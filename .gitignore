@@ -1,0 +1,48 @@
+# Node.js
+educerts/frontend/node_modules/
+educerts/frontend/.next/
+educerts/frontend/dist/
+educerts/frontend/.env
+educerts/frontend/.env.local
+educerts/frontend/.env.development.local
+educerts/frontend/.env.test.local
+educerts/frontend/.env.production.local
+educerts/frontend/npm-debug.log*
+educerts/frontend/yarn-debug.log*
+educerts/frontend/yarn-error.log*
+
+# Python
+educerts/backend/__pycache__/
+educerts/backend/*.py[cod]
+educerts/backend/*$py.class
+educerts/backend/.pytest_cache/
+educerts/backend/venv/
+educerts/backend/env/
+educerts/backend/.env
+educerts/backend/generated_certs/
+educerts/backend/user_templates/*.pdf
+educerts/backend/user_templates/*.html
+educerts/backend/user_templates/*.png
+educerts/backend/user_templates/*.jpg
+
+# Databases
+educerts/backend/*.db
+educerts/backend/*.sqlite3
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+.gemini/
+.agent/
+brain/
+logs/
+temp/
+tmp/
