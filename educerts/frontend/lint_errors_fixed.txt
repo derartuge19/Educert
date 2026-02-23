@@ -1,0 +1,81 @@
+﻿
+> frontend@0.1.0 lint
+> eslint
+
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\issue\page.tsx
+   6:35  warning  'X' is defined but never used                          @typescript-eslint/no-unused-vars
+   6:38  warning  'Info' is defined but never used                       @typescript-eslint/no-unused-vars
+  22:12  warning  'error' is assigned a value but never used             @typescript-eslint/no-unused-vars
+  34:12  warning  'importPreview' is assigned a value but never used     @typescript-eslint/no-unused-vars
+  34:27  warning  'setImportPreview' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  90:18  warning  'err' is defined but never used                        @typescript-eslint/no-unused-vars
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\login\page.tsx
+  9:10  warning  'Card' is defined but never used             @typescript-eslint/no-unused-vars
+  9:16  warning  'CardContent' is defined but never used      @typescript-eslint/no-unused-vars
+  9:29  warning  'CardDescription' is defined but never used  @typescript-eslint/no-unused-vars
+  9:46  warning  'CardFooter' is defined but never used       @typescript-eslint/no-unused-vars
+  9:58  warning  'CardHeader' is defined but never used       @typescript-eslint/no-unused-vars
+  9:70  warning  'CardTitle' is defined but never used        @typescript-eslint/no-unused-vars
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\page.tsx
+    9:29  warning  'CardDescription' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          @typescript-eslint/no-unused-vars
+   28:7   error    Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\page.tsx:28:7
+  26 |     if (user) {
+  27 |       // Mock stats for demo
+> 28 |       setStats({
+     |       ^^^^^^^^ Avoid calling setState() directly within an effect
+  29 |         totalIssued: user.is_admin ? 124 : 12,
+  30 |         totalVerified: user.is_admin ? 892 : 45,
+  31 |         pending: user.is_admin ? 3 : 0  react-hooks/set-state-in-effect
+   53:14  warning  'error' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    @typescript-eslint/no-unused-vars
+   64:45  error    `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      react/no-unescaped-entities
+   64:52  error    `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      react/no-unescaped-entities
+  193:15  error    `"` can be escaped with `&quot;`, `&ldquo;`, `&#34;`, `&rdquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      react/no-unescaped-entities
+  193:90  error    `"` can be escaped with `&quot;`, `&ldquo;`, `&#34;`, `&rdquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      react/no-unescaped-entities
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\settings\page.tsx
+  6:10  warning  'motion' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\app\verify\page.tsx
+    5:111  warning  'Lock' is defined but never used                                 @typescript-eslint/no-unused-vars
+    8:46   warning  'CardFooter' is defined but never used                           @typescript-eslint/no-unused-vars
+   35:18   warning  'err' is defined but never used                                  @typescript-eslint/no-unused-vars
+   53:18   warning  'err' is defined but never used                                  @typescript-eslint/no-unused-vars
+  182:72   error    `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+  258:98   error    `"` can be escaped with `&quot;`, `&ldquo;`, `&#34;`, `&rdquo;`  react/no-unescaped-entities
+  258:196  error    `"` can be escaped with `&quot;`, `&ldquo;`, `&#34;`, `&rdquo;`  react/no-unescaped-entities
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\components\Sidebar.tsx
+  15:61  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\context\AuthContext.tsx
+  44:11  warning  'pathname' is assigned a value but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              @typescript-eslint/no-unused-vars
+  49:13  error    Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+C:\Users\hp\OneDrive\Desktop\Educert\educerts\frontend\context\AuthContext.tsx:49:13
+  47 |         const savedUser = localStorage.getItem("user")
+  48 |         if (savedUser) {
+> 49 |             setUser(JSON.parse(savedUser))
+     |             ^^^^^^^ Avoid calling setState() directly within an effect
+  50 |         }
+  51 |         setLoading(false)
+  52 |     }, [])  react-hooks/set-state-in-effect
+
+Γ£û 30 problems (10 errors, 20 warnings)
+

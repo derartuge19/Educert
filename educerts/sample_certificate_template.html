@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Certificate of Completion</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 297mm;
+            height: 210mm;
+            background: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'EB Garamond', serif;
+        }
+
+        .cert-wrapper {
+            width: 270mm;
+            height: 190mm;
+            position: relative;
+            border: 3px solid #1a237e;
+            padding: 6mm;
+        }
+
+        /* Outer gold border */
+        .cert-wrapper::before {
+            content: '';
+            position: absolute;
+            inset: 4px;
+            border: 1.5px solid #c9a227;
+            pointer-events: none;
+        }
+
+        .cert-inner {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(160deg, #fffdf5 0%, #faf6e9 50%, #fffdf5 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8mm 14mm;
+        }
+
+        /* ── Corner ornaments ── */
+        .corner {
+            position: absolute;
+            width: 20mm;
+            height: 20mm;
+            border-color: #c9a227;
+            border-style: solid;
+        }
+
+        .corner.tl {
+            top: 8px;
+            left: 8px;
+            border-width: 2px 0 0 2px;
+        }
+
+        .corner.tr {
+            top: 8px;
+            right: 8px;
+            border-width: 2px 2px 0 0;
+        }
+
+        .corner.bl {
+            bottom: 8px;
+            left: 8px;
+            border-width: 0 0 2px 2px;
+        }
+
+        .corner.br {
+            bottom: 8px;
+            right: 8px;
+            border-width: 0 2px 2px 0;
+        }
+
+        /* ── Header ── */
+        .org-name {
+            font-family: 'Cinzel', serif;
+            font-size: 11pt;
+            color: #1a237e;
+            letter-spacing: 0.25em;
+            text-transform: uppercase;
+            text-align: center;
+        }
+
+        .divider {
+            width: 80%;
+            height: 1px;
+            background: linear-gradient(to right, transparent, #c9a227, transparent);
+            margin: 3mm auto;
+        }
+
+        .cert-title {
+            font-family: 'Cinzel', serif;
+            font-size: 22pt;
+            color: #1a237e;
+            text-align: center;
+            letter-spacing: 0.05em;
+            line-height: 1.2;
+        }
+
+        /* ── Body ── */
+        .body-section {
+            text-align: center;
+        }
+
+        .body-section .presented-to {
+            font-size: 10pt;
+            color: #555;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+        }
+
+        .recipient-name {
+            font-family: 'Cinzel', serif;
+            font-size: 28pt;
+            color: #1a237e;
+            margin: 2mm 0;
+            letter-spacing: 0.05em;
+        }
+
+        .body-section .body-text {
+            font-size: 11pt;
+            color: #333;
+            line-height: 1.7;
+            max-width: 200mm;
+            margin: 0 auto;
+            font-style: italic;
+        }
+
+        .program-name {
+            font-family: 'Cinzel', serif;
+            font-size: 14pt;
+            color: #b8860b;
+            display: inline;
+        }
+
+        /* ── Details Row ── */
+        .details-row {
+            display: flex;
+            justify-content: space-around;
+            width: 100%;
+            margin-top: 3mm;
+        }
+
+        .detail-item {
+            text-align: center;
+        }
+
+        .detail-item .detail-label {
+            font-family: 'Inter', sans-serif;
+            font-size: 7pt;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 1mm;
+        }
+
+        .detail-item .detail-value {
+            font-size: 10pt;
+            color: #222;
+            font-weight: 600;
+        }
+
+        /* ── Footer ── */
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            width: 100%;
+        }
+
+        .signature-block {
+            text-align: center;
+            min-width: 55mm;
+        }
+
+        .sig-line {
+            width: 50mm;
+            height: 1px;
+            background: #333;
+            margin: 0 auto 1mm;
+        }
+
+        .sig-label {
+            font-family: 'Inter', sans-serif;
+            font-size: 7pt;
+            color: #555;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }
+
+        .sig-name {
+            font-size: 9pt;
+            color: #222;
+            font-weight: 600;
+            margin-top: 1mm;
+        }
+
+        /* QR Code */
+        .qr-block {
+            text-align: center;
+        }
+
+        .qr-block img {
+            width: 22mm;
+            height: 22mm;
+            border: 1px solid #ddd;
+            padding: 1mm;
+        }
+
+        .qr-label {
+            font-family: 'Inter', sans-serif;
+            font-size: 6pt;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 1mm;
+        }
+
+        /* Cert ID */
+        .cert-id-bar {
+            font-family: 'Inter', sans-serif;
+            font-size: 7pt;
+            color: #aaa;
+            letter-spacing: 0.05em;
+            text-align: center;
+            margin-top: 2mm;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="cert-wrapper">
+        <!-- Corner ornaments -->
+        <div class="corner tl"></div>
+        <div class="corner tr"></div>
+        <div class="corner bl"></div>
+        <div class="corner br"></div>
+
+        <div class="cert-inner">
+
+            <!-- Header -->
+            <div style="text-align:center; width:100%;">
+                <div class="org-name">{{ organization }}</div>
+                <div class="divider"></div>
+                <div class="cert-title">Certificate of Completion</div>
+                <div class="divider"></div>
+            </div>
+
+            <!-- Body -->
+            <div class="body-section">
+                <div class="presented-to">This is to certify that</div>
+                <div class="recipient-name">{{ student_name }}</div>
+                <div class="body-text">
+                    has successfully completed the
+                    <span class="program-name">{{ course_name }}</span>
+                    program with the designation of
+                    <span class="program-name">{{ training_type }}</span>,
+                    demonstrating exceptional commitment and mastery of the subject matter.
+                </div>
+            </div>
+
+            <!-- Key Details -->
+            <div class="details-row">
+                <div class="detail-item">
+                    <div class="detail-label">Instructor</div>
+                    <div class="detail-value">{{ instructor }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Duration</div>
+                    <div class="detail-value">{{ hours }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Skills</div>
+                    <div class="detail-value">{{ skills }}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">Date Issued</div>
+                    <div class="detail-value">{{ issued_at }}</div>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="footer">
+                <!-- Signature -->
+                <div class="signature-block">
+                    <div class="sig-line"></div>
+                    <div class="sig-label">Authorized Signature</div>
+                    <div class="sig-name">{{ instructor }}</div>
+                </div>
+
+                <!-- QR Code -->
+                <div class="qr-block">
+                    <img src="data:image/png;base64,{{ qr_code }}" alt="Verification QR" />
+                    <div class="qr-label">Scan to Verify</div>
+                </div>
+
+                <!-- Cert ID -->
+                <div style="text-align:center; min-width:55mm;">
+                    <div class="sig-line"></div>
+                    <div class="sig-label">Certificate ID</div>
+                    <div class="sig-name" style="font-size:7pt; font-family:'Inter',sans-serif;">{{ cert_id }}</div>
+                </div>
+            </div>
+
+            <div class="cert-id-bar">Credential ID: {{ cert_id }} &nbsp;|&nbsp; Verified via EduCerts Blockchain
+                Registry</div>
+
+        </div>
+    </div>
+</body>
+
+</html>

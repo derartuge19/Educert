@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+python-multipart
+xhtml2pdf
+cryptography
+python-jose[cryptography]
+passlib[bcrypt]
+jinja2
+pdfplumber
+PyMuPDF
+openpyxl
+Pillow
+python-dotenv
+qrcode[pil]
