@@ -18,6 +18,7 @@ from xhtml2pdf import pisa
 from io import BytesIO
 import qrcode
 import base64
+import re
 from dotenv import load_dotenv
 
 import models, schemas, crypto_utils, database, auth_utils, oa_logic
@@ -34,20 +35,28 @@ templates = Jinja2Templates(directory="templates")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
-# CORS setup - strict origin
+# CORS setup - allow common local origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
-    allow_credentials=True,  # Required for cookies
+    allow_origins=[
+        FRONTEND_URL,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
+    errors = exc.errors()
+    print(f"VALIDATION ERROR: {errors}")
     return JSONResponse(
         status_code=422,
-        content={"detail": str(exc.errors()[0]["msg"]) if exc.errors() else "Validation error"}
+        content={"detail": str(errors[0]["msg"]) if errors else "Validation error"}
     )
 
 @app.exception_handler(Exception)
@@ -153,11 +162,14 @@ def signup(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/api/login")
 def login(response: Response, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    username = form_data.username.strip()
+    password = form_data.password.strip()
+    
     user = db.query(models.User).filter(
-        (models.User.name == form_data.username) | (models.User.email == form_data.username)
+        (models.User.name == username) | (models.User.email == username)
     ).first()
 
-    if not user or not auth_utils.verify_password(form_data.password, user.password):
+    if not user or not auth_utils.verify_password(password, user.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -562,167 +574,192 @@ async def parse_template(file: UploadFile = File(...)):
 @app.post("/api/templates/bulk-issue")
 async def bulk_issue_from_template(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
 ):
-    """
-    Reads a CSV file and issues one certificate per row.
-    The previously uploaded template (user_templates/custom_certificate.html) is used.
-    CSV column names are mapped directly to the template's {{ placeholder }} names.
-    Required CSV columns: student_name, course_name (at minimum).
-    """
-    import re
+    print(f"ENTER: bulk_issue_from_template - file={file.filename if file else 'None'} - user={current_user.name}")
+    try:
+        if not file.filename.endswith(".csv"):
+            raise HTTPException(status_code=400, detail="Only CSV files are allowed")
 
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+        # Determine which template to use
+        pdf_template_path = "user_templates/template.pdf"
+        html_template_path = "user_templates/custom_certificate.html"
+        use_pdf = os.path.exists(pdf_template_path)
+        use_html = os.path.exists(html_template_path)
 
-    # Determine which template to use
-    pdf_template_path = "user_templates/template.pdf"
-    html_template_path = "user_templates/custom_certificate.html"
-    use_pdf = os.path.exists(pdf_template_path)
-    use_html = os.path.exists(html_template_path)
+        if not use_pdf and not use_html:
+            raise HTTPException(status_code=400, detail="No template uploaded yet.")
 
-    if not use_pdf and not use_html:
-        raise HTTPException(status_code=400, detail="No template uploaded yet.")
-
-    template_path = pdf_template_path if use_pdf else html_template_path
-    if use_pdf:
-        # USE ROBUST PDF EXTRACTION
-        placeholder_map = pdf_utils.extract_pdf_placeholders(template_path)
-        template_fields = set(placeholder_map.keys())
-    else:
-        with open(template_path, "r", encoding="utf-8") as tf:
-            template_text = tf.read()
-        template_fields = set(re.findall(r"\{\{\s*([\w\s]+?)\s*\}\}", template_text))
-        template_fields = {f.strip() for f in template_fields}
-
-    # Parse the file
-    content_bytes = await file.read()
-    content = content_bytes.decode("utf-8", errors="ignore")
-    csv_reader = csv.DictReader(io.StringIO(content))
-    raw_rows = list(csv_reader)
-
-    if not raw_rows:
-        raise HTTPException(status_code=400, detail="CSV file is empty")
-
-    rows = raw_rows
-    headers = list(rows[0].keys())
-    name_col = next((h for h in headers if normalize_column_name(h) == "student_name"), None)
-    if not name_col:
-        name_col = next((h for h in headers if "name" in h.lower() or "roll" in h.lower() or "id" in h.lower()), None)
-    
-    course_col = next((h for h in headers if normalize_column_name(h) == "course_name"), None)
-    if not course_col:
-        course_col = next((h for h in headers if "course" in h.lower() or "subject" in h.lower() or "prog" in h.lower()), None)
-
-    # 1 batch for the whole bulk upload
-    batch_id = str(uuid.uuid4())
-    organization = rows[0].get("organization", "EduCerts Academy").strip() or "EduCerts Academy"
-    
-    issued_certs = []
-    system_auto = {"issued_at", "cert_id", "signature", "qr_code", "digital_signature", "stamp"}
-    os.makedirs("generated_certs", exist_ok=True)
-
-    total_rows = len(rows)
-    for idx, row in enumerate(rows):
-        print(f"DEBUG: Processing CSV row {idx+1}/{total_rows}...")
-        student_name = row.get(name_col, "").strip() if name_col else "Student"
-        course_name = row.get(course_col, "").strip() if course_col else "Course"
-        
-        # Build data-payload: Match template placeholders to row keys (case-insensitive)
-        data_payload_fields = {}
-        row_keys_lower = {k.lower(): k for k in row.keys()}
-        for field in template_fields:
-            if field in system_auto: continue
-            f_lower = field.lower()
-            if f_lower in row_keys_lower:
-                data_payload_fields[field] = row[row_keys_lower[f_lower]].strip()
-
-        cert_type = row.get("cert_type", "certificate").strip() or "certificate"
-        curr_organization = row.get("organization", organization).strip() or organization
-
-        # Build raw OA document
-        cert_id = str(uuid.uuid4())
-        raw_data = {
-            "id": cert_id[:12], # Using part of UUID for OA ID
-            "type": cert_type,
-            "name": course_name,
-            "issuedOn": datetime.datetime.now().isoformat(),
-            "recipient": {
-                "name": student_name,
-                "studentId": row.get("student_id", "N/A")
-            },
-            **{k: v for k, v in data_payload_fields.items() if k not in ("student_id", "organization")}
-        }
-
-        issuers = [{"name": curr_organization, "url": "https://educerts.io",
-                    "documentStore": "0x007d40224f6562461633ccfbaffd359ebb2fc9ba",
-                    "identityProof": {"type": "DNS-TXT", "location": "educerts.io"}}]
-
-        oa_doc = oa_logic.wrap_document(raw_data, issuers=issuers)
-        merkle_root = oa_doc["signature"]["merkleRoot"]
-        sig = crypto_utils.sign_data(merkle_root)
-        oa_doc["signature"]["signature"] = sig
-        oa_doc["signature"]["publicKey"] = crypto_utils.get_public_key_pem()
-
-        claim_pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
-
-        # Render PDF if PDF template exists
-        rendered_path = None
+        template_path = pdf_template_path if use_pdf else html_template_path
         if use_pdf:
-            issued_at_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            field_values = {
-                "student_name": student_name,
-                "course_name": course_name,
-                "issued_at": issued_at_str,
-                "cert_id": cert_id,
-                "signature": sig[:20] + "...",
-                **data_payload_fields
-            }
-            out_path = f"generated_certs/{cert_id}_base.pdf"
-            try:
-                print(f"DEBUG: Rendering PDF for cert {cert_id}...")
-                pdf_utils.render_pdf_certificate(
-                    pdf_template_path, field_values, out_path, placeholder_map=placeholder_map
-                )
-                rendered_path = out_path
-            except Exception as e:
-                import traceback
-                print(f"DEBUG: PDF RENDER ERROR: {e}")
-                traceback.print_exc()
-                rendered_path = None
+            # USE ROBUST PDF EXTRACTION
+            placeholder_map = pdf_utils.extract_pdf_placeholders(template_path)
+            template_fields = set(placeholder_map.keys())
+        else:
+            import re
+            with open(template_path, "r", encoding="utf-8") as tf:
+                template_text = tf.read()
+            template_fields = set(re.findall(r"\{\{\s*([\w\s]+?)\s*\}\}", template_text))
+            template_fields = {f.strip() for f in template_fields}
 
-        db_cert = models.Certificate(
-            id=cert_id, student_name=student_name, course_name=course_name,
-            cert_type=cert_type, data_payload=oa_doc, signature=sig,
-            claim_pin=claim_pin, organization=curr_organization, batch_id=batch_id,
-            template_type="pdf" if use_pdf else "html",
-            rendered_pdf_path=rendered_path,
-            signing_status="unsigned"
-        )
-        db.add(db_cert)
-        issued_certs.append({"id": cert_id, "student_name": student_name, "course_name": course_name, "signing_status": "unsigned"})
+        # Parse the file
+        print(f"DEBUG: Bulk issue request received for file: {file.filename}")
+        content_bytes = await file.read()
+        print(f"DEBUG: Read {len(content_bytes)} bytes from file")
         
-        if (idx + 1) % 10 == 0:
-            print(f"DEBUG: Committing progress at row {idx+1}...")
-            db.commit()
+        # Strip BOM if present
+        if content_bytes.startswith(b'\xef\xbb\xbf'):
+            print("DEBUG: BOM detected and stripped")
+            content_bytes = content_bytes[3:]
+            
+        content = content_bytes.decode("utf-8", errors="ignore")
+        csv_reader = csv.DictReader(io.StringIO(content))
+        raw_rows = list(csv_reader)
 
-    # Create the batch entry once all certs are added
-    # We use a placeholder Merkleroot for the batch or the root of the first cert
-    batch_merkle = issued_certs[0]["id"] if issued_certs else "batch_root"
-    db.add(models.DocumentRegistry(id=batch_id, merkle_root=batch_merkle,
-                                   issuer_name="EduCerts Admin", organization=organization, cert_count=len(issued_certs)))
-    db.commit()
-    return {
-        "message": f"{len(issued_certs)} certificates issued from template",
-        "count": len(issued_certs),
-        "certificates": issued_certs
-    }
+        if not raw_rows:
+            raise HTTPException(status_code=400, detail="CSV file is empty or missing headers")
+
+        rows = raw_rows
+        # Clean headers (strip BOM-remnants or whitespace)
+        headers = [h.strip().replace('\ufeff', '') for h in (rows[0].keys() if rows else [])]
+        
+        # Update rows with cleaned headers
+        rows = [ { k.strip().replace('\ufeff', ''): v for k, v in row.items() } for row in rows ]
+        
+        name_col = next((h for h in headers if normalize_column_name(h) == "student_name"), None)
+        if not name_col:
+            name_col = next((h for h in headers if "name" in h.lower() or "student" in h.lower()), None)
+        
+        course_col = next((h for h in headers if normalize_column_name(h) == "course_name"), None)
+        if not course_col:
+            course_col = next((h for h in headers if "course" in h.lower() or "subject" in h.lower()), None)
+
+        print(f"DEBUG: Mapping - name_col={name_col}, course_col={course_col}, headers={headers}")
+
+        if not name_col or not course_col:
+            raise HTTPException(status_code=400, detail=f"Required columns 'student_name' and 'course_name' not found. Found headers: {headers}")
+
+        # 1 batch for the whole bulk upload
+        batch_id = str(uuid.uuid4())
+        organization = rows[0].get("organization", "EduCerts Academy") or "EduCerts Academy"
+        
+        # [FIX] Create the batch entry BEFORE the certificates to avoid ForeignKeyViolation
+        batch_record = models.DocumentRegistry(
+            id=batch_id, 
+            merkle_root="pending", 
+            issuer_name=current_user.name, 
+            organization=organization, 
+            cert_count=len(rows)
+        )
+        db.add(batch_record)
+        db.commit() # Commit now so certificates can reference it
+        
+        issued_certs = []
+        system_auto = {"issued_at", "cert_id", "signature", "qr_code", "digital_signature", "stamp"}
+        os.makedirs("generated_certs", exist_ok=True)
+
+        total_rows = len(rows)
+        for idx, row in enumerate(rows):
+            print(f"DEBUG: Processing CSV row {idx+1}/{total_rows}...")
+            student_name = row.get(name_col, "").strip() if name_col else "Student"
+            course_name = row.get(course_col, "").strip() if course_col else "Course"
+            
+            # Build data-payload: Match template placeholders to row keys (case-insensitive)
+            data_payload_fields = {}
+            row_keys_lower = {k.lower(): k for k in row.keys()}
+            for field in template_fields:
+                if field in system_auto: continue
+                f_lower = field.lower()
+                if f_lower in row_keys_lower:
+                    data_payload_fields[field] = row[row_keys_lower[f_lower]].strip()
+
+            cert_type = row.get("cert_type", "certificate").strip() or "certificate"
+            curr_organization = row.get("organization", organization).strip() or organization
+
+            # Build raw OA document
+            cert_id = str(uuid.uuid4())
+            raw_data = {
+                "id": cert_id[:12],
+                "type": cert_type,
+                "name": course_name,
+                "issuedOn": datetime.datetime.now().isoformat(),
+                "recipient": {
+                    "name": student_name,
+                    "studentId": row.get("student_id", "N/A")
+                },
+                **{k: v for k, v in data_payload_fields.items() if k not in ("student_id", "organization")}
+            }
+
+            issuers = [{"name": curr_organization, "url": "https://educerts.io",
+                        "documentStore": "0x007d40224f6562461633ccfbaffd359ebb2fc9ba",
+                        "identityProof": {"type": "DNS-TXT", "location": "educerts.io"}}]
+
+            oa_doc = oa_logic.wrap_document(raw_data, issuers=issuers)
+            merkle_root = oa_doc["signature"]["merkleRoot"]
+            sig = crypto_utils.sign_data(merkle_root)
+            oa_doc["signature"]["signature"] = sig
+            oa_doc["signature"]["publicKey"] = crypto_utils.get_public_key_pem()
+
+            claim_pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
+
+            rendered_path = None
+            if use_pdf:
+                issued_at_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                field_values = {
+                    "student_name": student_name,
+                    "course_name": course_name,
+                    "issued_at": issued_at_str,
+                    "cert_id": cert_id,
+                    "signature": sig[:20] + "...",
+                    **data_payload_fields
+                }
+                out_path = f"generated_certs/{cert_id}_base.pdf"
+                try:
+                    pdf_utils.render_pdf_certificate(
+                        pdf_template_path, field_values, out_path, placeholder_map=placeholder_map
+                    )
+                    rendered_path = out_path
+                except Exception as e:
+                    print(f"DEBUG: PDF RENDER ERROR: {e}")
+                    rendered_path = None
+
+            db_cert = models.Certificate(
+                id=cert_id, student_name=student_name, course_name=course_name,
+                cert_type=cert_type, data_payload=oa_doc, signature=sig,
+                claim_pin=claim_pin, organization=curr_organization, batch_id=batch_id,
+                template_type="pdf" if use_pdf else "html",
+                rendered_pdf_path=rendered_path,
+                signing_status="unsigned"
+            )
+            db.add(db_cert)
+            issued_certs.append({"id": cert_id, "student_name": student_name, "course_name": course_name, "signing_status": "unsigned"})
+            
+            if (idx + 1) % 10 == 0:
+                print(f"DEBUG: Committing at row {idx+1}")
+                db.commit()
+
+        # Final update to the batch record with the real merkle root
+        batch_merkle = issued_certs[0]["id"] if issued_certs else "batch_root"
+        batch_record.merkle_root = batch_merkle
+        db.commit()
+        return {
+            "message": f"{len(issued_certs)} certificates issued from template",
+            "count": len(issued_certs),
+            "certificates": issued_certs
+        }
+    except Exception as e:
+        import traceback
+        err_detail = f"CRITICAL BULK ERROR: {str(e)}\n{traceback.format_exc()}"
+        print(err_detail)
+        raise HTTPException(status_code=500, detail=err_detail)
 
 
 @app.post("/api/templates/bulk-issue-excel")
 async def bulk_issue_from_excel(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
 ):
     """
     Reads an Excel (.xlsx) OR CSV file and issues one certificate per row.
@@ -784,6 +821,17 @@ async def bulk_issue_from_excel(
     # 1 batch for the whole bulk upload
     batch_id = str(uuid.uuid4())
     organization = rows[0].get("organization", "EduCerts Academy").strip() or "EduCerts Academy"
+
+    # [FIX] Create the batch entry BEFORE the certificates to avoid ForeignKeyViolation
+    batch_record = models.DocumentRegistry(
+        id=batch_id, 
+        merkle_root="pending", 
+        issuer_name=current_user.name, 
+        organization=organization, 
+        cert_count=len(rows)
+    )
+    db.add(batch_record)
+    db.commit()
 
     issued_certs = []
     system_auto = {"issued_at", "cert_id", "signature", "qr_code", "digital_signature", "stamp"}
@@ -871,10 +919,9 @@ async def bulk_issue_from_excel(
             print(f"DEBUG: Committing progress at row {idx+1}...")
             db.commit()
 
-    # Create the batch entry once all certs are added
+    # Final update to the batch record with the real merkle root
     batch_merkle = issued_certs[0]["id"] if issued_certs else "batch_root"
-    db.add(models.DocumentRegistry(id=batch_id, merkle_root=batch_merkle,
-                                   issuer_name="EduCerts Admin", organization=organization, cert_count=len(issued_certs)))
+    batch_record.merkle_root = batch_merkle
     db.commit()
     return {
         "message": f"{len(issued_certs)} certificates issued",
