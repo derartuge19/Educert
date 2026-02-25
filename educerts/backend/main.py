@@ -34,14 +34,21 @@ templates = Jinja2Templates(directory="templates")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
-# CORS setup - strict origin
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
-    allow_credentials=True,  # Required for cookies
+    allow_origins=[FRONTEND_URL, "http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"DEBUG REQ: {request.method} {request.url.path}")
+    print(f"DEBUG REQ Cookies: {request.cookies}")
+    response = await call_next(request)
+    return response
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -73,16 +80,19 @@ def normalize_column_name(header: str) -> str:
     """
     if not header:
         return ""
-    h = str(header).lower().strip().replace(" ", "_").replace("-", "_")
+    import re
+    h = str(header).lower().strip()
+    h = h.replace(" ", "_").replace("-", "_")
+    h = re.sub(r'[^a-z0-9_]', '', h)
     
     # Aliases for student_name
     if h in {"student_name", "student", "full_name", "name", "recipient", "recipient_name", "candidate_name", "student_fullname",
-             "rollno", "roll_no", "enrn", "enrollment_no", "student_id", "reg_no", "registration_number"}:
+             "rollno", "roll_no", "enrn", "enrollment_no", "student_id", "reg_no", "registration_number", "studentname", "fullname"}:
         return "student_name"
     
     # Aliases for course_name
     if h in {"course_name", "course", "subject", "program", "training_name", "training", "module", "study_program",
-             "subject_1", "subject_code", "course_code"}:
+             "subject_1", "subject_code", "course_code", "coursename", "trainingname"}:
         return "course_name"
 
     return h
@@ -93,14 +103,24 @@ def get_current_user_from_cookie(
 ) -> Optional[models.User]:
     """Dependency to extract and validate the user from the HttpOnly cookie."""
     if not access_token:
+        print("DEBUG AUTH: No access_token cookie found.")
         return None
+    
     payload = auth_utils.decode_access_token(access_token)
     if not payload:
+        print("DEBUG AUTH: Failed to decode access_token.")
         return None
+        
     username = payload.get("sub")
     if not username:
+        print("DEBUG AUTH: No 'sub' in payload.")
         return None
+        
     user = db.query(models.User).filter(models.User.name == username).first()
+    if not user:
+        print(f"DEBUG AUTH: User '{username}' not found in database.")
+        return None
+        
     return user
 
 def require_user(current_user: Optional[models.User] = Depends(get_current_user_from_cookie)) -> models.User:
@@ -212,6 +232,7 @@ def logout(response: Response):
 @app.post("/api/issue", response_model=schemas.Certificate)
 def issue_certificate(cert_data: schemas.CertificateCreate, db: Session = Depends(get_db)):
     cert_type = (cert_data.cert_type or "certificate").lower()
+    cert_id = str(uuid.uuid4())
 
     # Build a generic document structure — no hardcoded transcript assumption
     raw_data = {
@@ -239,9 +260,13 @@ def issue_certificate(cert_data: schemas.CertificateCreate, db: Session = Depend
 
     # Wrap and sign
     oa_doc = oa_logic.wrap_document(raw_data, issuers=issuers)
+    # Even for a single cert, we treat it as a batch of 1
     merkle_root = oa_doc["signature"]["merkleRoot"]
-    signature = crypto_utils.sign_data(merkle_root)
-    oa_doc["signature"]["signature"] = signature
+    target_hash = oa_doc["signature"]["targetHash"]
+    
+    # Sign the merkle root
+    sig = crypto_utils.sign_data(merkle_root)
+    oa_doc["signature"]["signature"] = sig
     oa_doc["signature"]["publicKey"] = crypto_utils.get_public_key_pem()
 
     # Anchor Merkle Root to Document Registry
@@ -257,17 +282,45 @@ def issue_certificate(cert_data: schemas.CertificateCreate, db: Session = Depend
 
     claim_pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
 
-    cert_id = str(uuid.uuid4())
+    # If a PDF template exists, render it immediately
+    pdf_template_path = "user_templates/template.pdf"
+    rendered_path = None
+    if os.path.exists(pdf_template_path):
+        verify_url = f"{FRONTEND_URL}/verify?id={cert_id}"
+        qr_b64 = generate_qr_base64(verify_url)
+        issued_at_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # Build field values from the data_payload + core fields
+        field_values = {
+            "student_name": cert_data.student_name,
+            "course_name": cert_data.course_name,
+            "issued_at": issued_at_str,
+            "cert_id": cert_id,
+            "signature": sig[:20] + "...",
+            "qr_code": qr_b64,
+            **cert_data.data_payload
+        }
+        
+        os.makedirs("generated_certs", exist_ok=True)
+        out_path = f"generated_certs/{cert_id}_base.pdf"
+        try:
+            pdf_utils.render_pdf_certificate(pdf_template_path, field_values, out_path)
+            rendered_path = out_path
+        except Exception as e:
+            print(f"DEBUG: Single issuance PDF render failed: {e}")
+
     db_cert = models.Certificate(
         id=cert_id,
         student_name=cert_data.student_name,
         course_name=cert_data.course_name,
         cert_type=cert_type,
         data_payload=oa_doc,
-        signature=signature,
+        signature=sig,
         claim_pin=claim_pin,
         organization=organization,
-        batch_id=batch_id
+        batch_id=batch_id,
+        template_type="pdf" if os.path.exists(pdf_template_path) else "html",
+        rendered_pdf_path=rendered_path
     )
     db.add(db_cert)
     db.commit()
@@ -322,11 +375,22 @@ def verify_certificate(request: schemas.VerificationRequest, db: Session = Depen
 
     # 1. Integrity Check
     merkle_root = oa_doc.get("signature", {}).get("merkleRoot")
+    target_hash = oa_doc.get("signature", {}).get("targetHash")
+    proof = oa_doc.get("signature", {}).get("proof", [])
     signature = oa_doc.get("signature", {}).get("signature")
     salted_data = oa_doc.get("data", {})
+    
+    # Calculate target hash from data
     field_hashes = oa_logic.get_field_hashes(salted_data)
-    calculated_root = oa_logic.calculate_merkle_root(field_hashes)
-    is_integrity_valid = (calculated_root == merkle_root)
+    calculated_target_hash = oa_logic.calculate_merkle_root(field_hashes)
+    
+    # Check if target hash matches calculations
+    is_target_hash_valid = (calculated_target_hash == target_hash)
+    
+    # Verify target hash belongs to merkle root using proof
+    is_merkle_root_valid = oa_logic.verify_merkle_proof(target_hash, proof, merkle_root)
+    
+    is_integrity_valid = is_target_hash_valid and is_merkle_root_valid
 
     # 2. Document Status
     is_issued = cert is not None
@@ -409,7 +473,7 @@ def get_student_certificates(student_name: str, db: Session = Depends(get_db)):
     return db.query(models.Certificate).filter(models.Certificate.student_name == student_name).all()
 
 @app.post("/api/revoke/{cert_id}")
-def revoke_certificate(cert_id: str, db: Session = Depends(get_db)):
+def revoke_certificate(cert_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
     cert = db.query(models.Certificate).filter(models.Certificate.id == cert_id).first()
     if not cert:
         raise HTTPException(status_code=404, detail="Certificate not found")
@@ -421,6 +485,50 @@ def revoke_certificate(cert_id: str, db: Session = Depends(get_db)):
             registry.revoked = True
     db.commit()
     return {"message": "Certificate revoked and removed from Document Registry"}
+
+@app.delete("/api/certificates/{cert_id}")
+def delete_certificate(cert_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    cert = db.query(models.Certificate).filter(models.Certificate.id == cert_id).first()
+    if not cert:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    
+    # Optional: Delete the physical file if it exists
+    if cert.rendered_pdf_path and os.path.exists(cert.rendered_pdf_path):
+        try:
+            os.remove(cert.rendered_pdf_path)
+        except:
+            pass
+            
+    db.delete(cert)
+    db.commit()
+    return {"message": "Certificate deleted successfully"}
+
+@app.post("/api/certificates/bulk-revoke")
+def bulk_revoke_certificates(request: schemas.BulkActionRequest, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    certs = db.query(models.Certificate).filter(models.Certificate.id.in_(request.cert_ids)).all()
+    for cert in certs:
+        cert.revoked = True
+        if cert.batch_id:
+            registry = db.query(models.DocumentRegistry).filter(models.DocumentRegistry.id == cert.batch_id).first()
+            if registry:
+                registry.revoked = True
+    db.commit()
+    return {"message": f"Successfully revoked {len(certs)} certificates"}
+
+@app.post("/api/certificates/bulk-delete")
+def bulk_delete_certificates(request: schemas.BulkActionRequest, db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
+    certs = db.query(models.Certificate).filter(models.Certificate.id.in_(request.cert_ids)).all()
+    count = 0
+    for cert in certs:
+        if cert.rendered_pdf_path and os.path.exists(cert.rendered_pdf_path):
+            try:
+                os.remove(cert.rendered_pdf_path)
+            except:
+                pass
+        db.delete(cert)
+        count += 1
+    db.commit()
+    return {"message": f"Successfully deleted {count} document(s)"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Document Registry API
@@ -562,6 +670,7 @@ async def parse_template(file: UploadFile = File(...)):
 @app.post("/api/templates/bulk-issue")
 async def bulk_issue_from_template(
     file: UploadFile = File(...),
+    cert_type: str = Form("certificate"),
     db: Session = Depends(get_db)
 ):
     """
@@ -614,103 +723,149 @@ async def bulk_issue_from_template(
     if not course_col:
         course_col = next((h for h in headers if "course" in h.lower() or "subject" in h.lower() or "prog" in h.lower()), None)
 
-    # 1 batch for the whole bulk upload
+    # Missing logic: Define needed variables
     batch_id = str(uuid.uuid4())
     organization = rows[0].get("organization", "EduCerts Academy").strip() or "EduCerts Academy"
-    
     issued_certs = []
     system_auto = {"issued_at", "cert_id", "signature", "qr_code", "digital_signature", "stamp"}
     os.makedirs("generated_certs", exist_ok=True)
 
+    # 1. First Pass: Create all OA documents and collect target hashes
+    batch_data = []
+    target_hashes = []
+    
     total_rows = len(rows)
     for idx, row in enumerate(rows):
         print(f"DEBUG: Processing CSV row {idx+1}/{total_rows}...")
         student_name = row.get(name_col, "").strip() if name_col else "Student"
         course_name = row.get(course_col, "").strip() if course_col else "Course"
         
-        # Build data-payload: Match template placeholders to row keys (case-insensitive)
         data_payload_fields = {}
-        row_keys_lower = {k.lower(): k for k in row.keys()}
+        row_keys_normalized = {normalize_column_name(k): k for k in row.keys()}
+        
         for field in template_fields:
             if field in system_auto: continue
-            f_lower = field.lower()
-            if f_lower in row_keys_lower:
-                data_payload_fields[field] = row[row_keys_lower[f_lower]].strip()
+            
+            # 1. Try exact match
+            if field in row:
+                data_payload_fields[field] = str(row[field]).strip() if row[field] is not None else ""
+                continue
+                
+            # 2. Try normalized match
+            f_norm = normalize_column_name(field)
+            if f_norm in row_keys_normalized:
+                val = row[row_keys_normalized[f_norm]]
+                data_payload_fields[field] = str(val).strip() if val is not None else ""
+                continue
+            
+            # 3. Handle common aliases explicitly
+            if f_norm == "student_name" and name_col:
+                data_payload_fields[field] = str(row[name_col]).strip() if row[name_col] is not None else ""
+            elif f_norm == "course_name" and course_col:
+                data_payload_fields[field] = str(row[course_col]).strip() if row[course_col] is not None else ""
 
-        cert_type = row.get("cert_type", "certificate").strip() or "certificate"
+        curr_cert_type = row.get("cert_type", cert_type).strip() or cert_type
         curr_organization = row.get("organization", organization).strip() or organization
 
-        # Build raw OA document
         cert_id = str(uuid.uuid4())
         raw_data = {
-            "id": cert_id[:12], # Using part of UUID for OA ID
-            "type": cert_type,
+            "id": cert_id[:12],
+            "type": curr_cert_type,
             "name": course_name,
             "issuedOn": datetime.datetime.now().isoformat(),
-            "recipient": {
-                "name": student_name,
-                "studentId": row.get("student_id", "N/A")
-            },
+            "recipient": {"name": student_name, "studentId": row.get("student_id", "N/A")},
             **{k: v for k, v in data_payload_fields.items() if k not in ("student_id", "organization")}
         }
-
         issuers = [{"name": curr_organization, "url": "https://educerts.io",
                     "documentStore": "0x007d40224f6562461633ccfbaffd359ebb2fc9ba",
                     "identityProof": {"type": "DNS-TXT", "location": "educerts.io"}}]
 
         oa_doc = oa_logic.wrap_document(raw_data, issuers=issuers)
-        merkle_root = oa_doc["signature"]["merkleRoot"]
-        sig = crypto_utils.sign_data(merkle_root)
-        oa_doc["signature"]["signature"] = sig
-        oa_doc["signature"]["publicKey"] = crypto_utils.get_public_key_pem()
+        target_hashes.append(oa_doc["signature"]["targetHash"])
+        
+        batch_data.append({
+            "cert_id": cert_id,
+            "student_name": student_name,
+            "course_name": course_name,
+            "curr_cert_type": curr_cert_type,
+            "curr_organization": curr_organization,
+            "oa_doc": oa_doc,
+            "data_payload_fields": data_payload_fields
+        })
 
-        claim_pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    # 2. Batch Cryptography
+    batch_merkle_root = oa_logic.calculate_merkle_root(target_hashes)
+    batch_sig = crypto_utils.sign_data(batch_merkle_root)
+    public_key_pem = crypto_utils.get_public_key_pem()
 
-        # Render PDF if PDF template exists
+    # Anchor Batch to Document Registry
+    db.add(models.DocumentRegistry(
+        id=batch_id, 
+        merkle_root=batch_merkle_root,
+        issuer_name="EduCerts Admin", 
+        organization=organization, 
+        cert_count=len(batch_data)
+    ))
+
+    # 3. Second Pass: Generate Proofs, Render PDFs and Save to DB
+    for idx, item in enumerate(batch_data):
+        oa_doc = item["oa_doc"]
+        target_hash = oa_doc["signature"]["targetHash"]
+        
+        proof = oa_logic.get_merkle_proof(target_hashes, target_hash)
+        
+        oa_doc["signature"]["merkleRoot"] = batch_merkle_root
+        oa_doc["signature"]["proof"] = proof
+        oa_doc["signature"]["signature"] = batch_sig
+        oa_doc["signature"]["publicKey"] = public_key_pem
+
+        # Render PDF
         rendered_path = None
         if use_pdf:
             issued_at_str = datetime.datetime.now().strftime("%Y-%m-%d")
             field_values = {
-                "student_name": student_name,
-                "course_name": course_name,
+                "student_name": item["student_name"],
+                "course_name": item["course_name"],
                 "issued_at": issued_at_str,
-                "cert_id": cert_id,
-                "signature": sig[:20] + "...",
-                **data_payload_fields
+                "cert_id": item["cert_id"],
+                "signature": batch_sig[:20] + "...",
+                **item["data_payload_fields"]
             }
-            out_path = f"generated_certs/{cert_id}_base.pdf"
+            out_path = f"generated_certs/{item['cert_id']}_base.pdf"
             try:
-                print(f"DEBUG: Rendering PDF for cert {cert_id}...")
                 pdf_utils.render_pdf_certificate(
-                    pdf_template_path, field_values, out_path, placeholder_map=placeholder_map
+                    template_path, field_values, out_path, placeholder_map=placeholder_map
                 )
                 rendered_path = out_path
             except Exception as e:
-                import traceback
                 print(f"DEBUG: PDF RENDER ERROR: {e}")
-                traceback.print_exc()
                 rendered_path = None
 
         db_cert = models.Certificate(
-            id=cert_id, student_name=student_name, course_name=course_name,
-            cert_type=cert_type, data_payload=oa_doc, signature=sig,
-            claim_pin=claim_pin, organization=curr_organization, batch_id=batch_id,
+            id=item["cert_id"], 
+            student_name=item["student_name"], 
+            course_name=item["course_name"],
+            cert_type=item["curr_cert_type"], 
+            data_payload=oa_doc, 
+            signature=batch_sig,
+            claim_pin="".join([str(random.randint(0, 9)) for _ in range(6)]), 
+            organization=item["curr_organization"], 
+            batch_id=batch_id,
             template_type="pdf" if use_pdf else "html",
             rendered_pdf_path=rendered_path,
             signing_status="unsigned"
         )
         db.add(db_cert)
-        issued_certs.append({"id": cert_id, "student_name": student_name, "course_name": course_name, "signing_status": "unsigned"})
+        issued_certs.append({
+            "id": item["cert_id"], 
+            "student_name": item["student_name"],
+            "course_name": item["course_name"], 
+            "signing_status": "unsigned"
+        })
         
         if (idx + 1) % 10 == 0:
-            print(f"DEBUG: Committing progress at row {idx+1}...")
             db.commit()
 
-    # Create the batch entry once all certs are added
-    # We use a placeholder Merkleroot for the batch or the root of the first cert
-    batch_merkle = issued_certs[0]["id"] if issued_certs else "batch_root"
-    db.add(models.DocumentRegistry(id=batch_id, merkle_root=batch_merkle,
-                                   issuer_name="EduCerts Admin", organization=organization, cert_count=len(issued_certs)))
     db.commit()
     return {
         "message": f"{len(issued_certs)} certificates issued from template",
@@ -722,6 +877,7 @@ async def bulk_issue_from_template(
 @app.post("/api/templates/bulk-issue-excel")
 async def bulk_issue_from_excel(
     file: UploadFile = File(...),
+    cert_type: str = Form("certificate"),
     db: Session = Depends(get_db)
 ):
     """
@@ -776,7 +932,7 @@ async def bulk_issue_from_excel(
     name_col = next((h for h in headers if normalize_column_name(h) == "student_name"), None)
     if not name_col:
         name_col = next((h for h in headers if "name" in h.lower() or "roll" in h.lower() or "id" in h.lower()), None)
-
+    
     course_col = next((h for h in headers if normalize_column_name(h) == "course_name"), None)
     if not course_col:
         course_col = next((h for h in headers if "course" in h.lower() or "subject" in h.lower() or "prog" in h.lower() or "cent" in h.lower()), None)
@@ -789,29 +945,47 @@ async def bulk_issue_from_excel(
     system_auto = {"issued_at", "cert_id", "signature", "qr_code", "digital_signature", "stamp"}
     os.makedirs("generated_certs", exist_ok=True)
 
+    # 1. First Pass: Create all OA documents and collect target hashes
+    batch_data = []
+    target_hashes = []
+    
     total_rows = len(rows)
     for idx, row in enumerate(rows):
         print(f"DEBUG: Processing Excel row {idx+1}/{total_rows}...")
         student_name = row.get(name_col, "").strip() if name_col else "Student"
         course_name = row.get(course_col, "").strip() if course_col else "Course"
         
-        # Build data_payload: Match template placeholders to row keys (case-insensitive)
         data_payload_fields = {}
-        row_keys_lower = {k.lower(): k for k in row.keys()}
+        row_keys_normalized = {normalize_column_name(k): k for k in row.keys()}
+        
         for field in template_fields:
             if field in system_auto: continue
-            f_lower = field.lower()
-            if f_lower in row_keys_lower:
-                data_payload_fields[field] = row[row_keys_lower[f_lower]].strip()
+            
+            # 1. Try exact match
+            if field in row:
+                data_payload_fields[field] = str(row[field]).strip() if row[field] is not None else ""
+                continue
+                
+            # 2. Try normalized match
+            f_norm = normalize_column_name(field)
+            if f_norm in row_keys_normalized:
+                val = row[row_keys_normalized[f_norm]]
+                data_payload_fields[field] = str(val).strip() if val is not None else ""
+                continue
+            
+            # 3. Handle common aliases explicitly
+            if f_norm == "student_name" and name_col:
+                data_payload_fields[field] = str(row[name_col]).strip() if row[name_col] is not None else ""
+            elif f_norm == "course_name" and course_col:
+                data_payload_fields[field] = str(row[course_col]).strip() if row[course_col] is not None else ""
 
-        cert_type = row.get("cert_type", "certificate").strip() or "certificate"
+        curr_cert_type = row.get("cert_type", cert_type).strip() or cert_type
         curr_organization = row.get("organization", organization).strip() or organization
 
-        # Build raw OA document
         cert_id = str(uuid.uuid4())
         raw_data = {
             "id": cert_id[:12],
-            "type": cert_type,
+            "type": curr_cert_type,
             "name": course_name,
             "issuedOn": datetime.datetime.now().isoformat(),
             "recipient": {"name": student_name, "studentId": row.get("student_id", "N/A")},
@@ -822,30 +996,63 @@ async def bulk_issue_from_excel(
                     "identityProof": {"type": "DNS-TXT", "location": "educerts.io"}}]
 
         oa_doc = oa_logic.wrap_document(raw_data, issuers=issuers)
-        merkle_root = oa_doc["signature"]["merkleRoot"]
-        sig = crypto_utils.sign_data(merkle_root)
-        oa_doc["signature"]["signature"] = sig
-        oa_doc["signature"]["publicKey"] = crypto_utils.get_public_key_pem()
+        target_hashes.append(oa_doc["signature"]["targetHash"])
+        
+        batch_data.append({
+            "cert_id": cert_id,
+            "student_name": student_name,
+            "course_name": course_name,
+            "curr_cert_type": curr_cert_type,
+            "curr_organization": curr_organization,
+            "oa_doc": oa_doc,
+            "data_payload_fields": data_payload_fields
+        })
 
-        claim_pin = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    # 2. Batch Cryptography
+    batch_merkle_root = oa_logic.calculate_merkle_root(target_hashes)
+    batch_sig = crypto_utils.sign_data(batch_merkle_root)
+    public_key_pem = crypto_utils.get_public_key_pem()
 
-        # Render PDF if PDF template exists
+    # Anchor Batch to Document Registry
+    db.add(models.DocumentRegistry(
+        id=batch_id, 
+        merkle_root=batch_merkle_root,
+        issuer_name="EduCerts Admin", 
+        organization=organization, 
+        cert_count=len(batch_data)
+    ))
+
+    # 3. Second Pass: Generate Proofs, Render PDFs and Save to DB
+    for idx, item in enumerate(batch_data):
+        oa_doc = item["oa_doc"]
+        target_hash = oa_doc["signature"]["targetHash"]
+        
+        # Calculate individual Merkle Proof path
+        proof = oa_logic.get_merkle_proof(target_hashes, target_hash)
+        
+        # Update OA document with batch info
+        oa_doc["signature"]["merkleRoot"] = batch_merkle_root
+        oa_doc["signature"]["proof"] = proof
+        oa_doc["signature"]["signature"] = batch_sig
+        oa_doc["signature"]["publicKey"] = public_key_pem
+
+        # Render PDF
         rendered_path = None
         if use_pdf:
             issued_at_str = datetime.datetime.now().strftime("%Y-%m-%d")
             field_values = {
-                "student_name": student_name,
-                "course_name": course_name,
+                "student_name": item["student_name"],
+                "course_name": item["course_name"],
                 "issued_at": issued_at_str,
-                "cert_id": cert_id,
-                "signature": sig[:20] + "...",
-                **data_payload_fields
+                "cert_id": item["cert_id"],
+                "signature": batch_sig[:20] + "...",
+                **item["data_payload_fields"]
             }
-            out_path = f"generated_certs/{cert_id}_base.pdf"
+            out_path = f"generated_certs/{item['cert_id']}_base.pdf"
             try:
-                print(f"DEBUG: Rendering PDF for cert {cert_id}...")
+                print(f"DEBUG: Rendering PDF for cert {item['cert_id']}...")
                 pdf_utils.render_pdf_certificate(
-                    pdf_template_path, field_values, out_path, placeholder_map=placeholder_map
+                    template_path, field_values, out_path, placeholder_map=placeholder_map
                 )
                 rendered_path = out_path
                 print(f"DEBUG: PDF rendered successfully: {out_path}")
@@ -856,30 +1063,35 @@ async def bulk_issue_from_excel(
                 rendered_path = None
 
         db_cert = models.Certificate(
-            id=cert_id, student_name=student_name, course_name=course_name,
-            cert_type=cert_type, data_payload=oa_doc, signature=sig,
-            claim_pin=claim_pin, organization=curr_organization, batch_id=batch_id,
+            id=item["cert_id"], 
+            student_name=item["student_name"], 
+            course_name=item["course_name"],
+            cert_type=item["curr_cert_type"], 
+            data_payload=oa_doc, 
+            signature=batch_sig,
+            claim_pin="".join([str(random.randint(0, 9)) for _ in range(6)]), 
+            organization=item["curr_organization"], 
+            batch_id=batch_id,
             template_type="pdf" if use_pdf else "html",
             rendered_pdf_path=rendered_path,
             signing_status="unsigned"
         )
         db.add(db_cert)
-        issued_certs.append({"id": cert_id, "student_name": student_name,
-                              "course_name": course_name, "signing_status": "unsigned"})
+        issued_certs.append({
+            "id": item["cert_id"], 
+            "student_name": item["student_name"],
+            "course_name": item["course_name"], 
+            "signing_status": "unsigned"
+        })
         
         if (idx + 1) % 10 == 0:
             print(f"DEBUG: Committing progress at row {idx+1}...")
             db.commit()
 
-    # Create the batch entry once all certs are added
-    batch_merkle = issued_certs[0]["id"] if issued_certs else "batch_root"
-    db.add(models.DocumentRegistry(id=batch_id, merkle_root=batch_merkle,
-                                   issuer_name="EduCerts Admin", organization=organization, cert_count=len(issued_certs)))
     db.commit()
     return {
         "message": f"{len(issued_certs)} certificates issued",
         "count": len(issued_certs),
-        "certificates": issued_certs
     }
 
 
@@ -993,7 +1205,11 @@ async def apply_digital_signatures(
                     signature_img_path=sig_path,
                     stamp_img_path=stamp_path,
                     template_path=pdf_template_path,
-                    output_path=signed_pdf_path
+                    output_path=signed_pdf_path,
+                    signer_info={
+                        "name": signer_name,
+                        "role": signer_role
+                    }
                 )
                 cert.rendered_pdf_path = signed_pdf_path
             except Exception as e:
@@ -1086,6 +1302,24 @@ def get_unsigned_certificates(
     ]
 
 
+@app.get("/api/certificates/{cert_id}")
+def get_certificate(cert_id: str, db: Session = Depends(get_db)):
+    """Returns details for a specific certificate."""
+    c = db.query(models.Certificate).filter(models.Certificate.id == cert_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Certificate not found")
+    return {
+        "id": c.id,
+        "student_name": c.student_name,
+        "course_name": c.course_name,
+        "cert_type": c.cert_type,
+        "issued_at": c.issued_at.isoformat() if c.issued_at else None,
+        "organization": c.organization,
+        "signing_status": c.signing_status,
+        "template_type": c.template_type
+    }
+
+
 @app.get("/api/sign/records")
 def get_signature_records(
     db: Session = Depends(get_db),
@@ -1128,7 +1362,7 @@ def download_certificate(cert_id: str, db: Session = Depends(get_db)):
         return FileResponse(
             path=cert.rendered_pdf_path,
             media_type="application/pdf",
-            filename=f"cert_{cert.id}.pdf"
+            headers={"Content-Disposition": f"inline; filename=cert_{cert.id}.pdf"}
         )
 
     # ── PDF template path ──
@@ -1183,7 +1417,7 @@ def download_certificate(cert_id: str, db: Session = Depends(get_db)):
         return FileResponse(
             path=out_path,
             media_type="application/pdf",
-            filename=f"cert_{cert.id}.pdf"
+            headers={"Content-Disposition": f"inline; filename=cert_{cert.id}.pdf"}
         )
 
     # ── Fallback: HTML template → xhtml2pdf ──

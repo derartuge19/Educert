@@ -98,3 +98,6 @@ class VerificationRequest(BaseModel):
     certificate_id: Optional[str] = None
     data_payload: Optional[Dict[str, Any]] = None
     signature: Optional[str] = None
+
+class BulkActionRequest(BaseModel):
+    cert_ids: list[str]

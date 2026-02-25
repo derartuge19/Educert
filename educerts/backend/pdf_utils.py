@@ -24,14 +24,43 @@ from pathlib import Path
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([\w\s]+?)\s*\}\}")
 
 # ──────────────────────────────────────────────────────────────────
-# 1) Extract placeholders + their bounding boxes from a PDF template
+# 0) Helpers for Font Mapping
 # ──────────────────────────────────────────────────────────────────
+
+def _map_font_name(font_name: str) -> str:
+    """
+    Maps extraction font names to PyMuPDF standard font names.
+    Prevents 'need font file or buffer' error by ensuring we use built-in fonts.
+    """
+    fn = str(font_name).lower()
+    
+    # Check for bold and italic flags in the name
+    is_bold = "bold" in fn or "black" in fn or "heavy" in fn
+    is_italic = "italic" in fn or "oblique" in fn
+    
+    # Map serif/times
+    if "times" in fn or "serif" in fn or "roman" in fn:
+        if is_bold and is_italic: return "tibi"
+        if is_bold: return "tibo"
+        if is_italic: return "tiit"
+        return "tiro"
+        
+    # Map monospace/courier
+    if "courier" in fn or "mono" in fn or "consolas" in fn:
+        if is_bold and is_italic: return "cobi"
+        if is_bold: return "cobo"
+        if is_italic: return "coit"
+        return "cour"
+        
+    # Default to Helvetica/Sans-Serif
+    if is_bold and is_italic: return "hebi"
+    if is_bold: return "hebo"
+    if is_italic: return "heit"
+    return "helv"
 
 def extract_pdf_placeholders(pdf_path: str) -> dict:
     """
-    Ultra-robust extraction of placeholders from:
-    1. Text layer: {{field_name}}
-    2. Interactive Form Fields (AcroForms): Field Names
+    Robust extraction of placeholders with font metadata.
     """
     result: dict[str, list] = {}
     doc = fitz.open(pdf_path)
@@ -43,7 +72,6 @@ def extract_pdf_placeholders(pdf_path: str) -> dict:
             if field_name:
                 if field_name not in result:
                     result[field_name] = []
-                # Store widget position; we can fill it directly later
                 result[field_name].append({
                     "type": "acroform",
                     "page": page_idx,
@@ -51,35 +79,40 @@ def extract_pdf_placeholders(pdf_path: str) -> dict:
                 })
 
         # --- PASS 2: Text Layer ({{placeholder}}) ---
-        words = page.get_text("words")
-        if words:
-            full_text = ""
-            index_map = []
-            for w in words:
-                word_str = w[4]
-                for _ in range(len(word_str)):
-                    index_map.append(w)
-                full_text += word_str + " "
-                index_map.append(None)
+        # Using dict format to get font info
+        page_dict = page.get_text("dict")
+        page_width = page.rect.width
+        page_center = page_width / 2
 
-            for match in PLACEHOLDER_RE.finditer(full_text):
-                field_name = match.group(1)
-                start, end = match.start(), match.end()
-                participating_words = [index_map[k] for k in range(start, end) if index_map[k] is not None]
-                
-                if participating_words:
-                    x0 = min(w[0] for w in participating_words)
-                    y0 = min(w[1] for w in participating_words)
-                    x1 = max(w[2] for w in participating_words)
-                    y1 = max(w[3] for w in participating_words)
-                    
-                    if field_name not in result:
-                        result[field_name] = []
-                    result[field_name].append({
-                        "type": "text_overlay",
-                        "page": page_idx,
-                        "rect": (x0, y0, x1, y1)
-                    })
+        for block in page_dict.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span["text"]
+                    for match in PLACEHOLDER_RE.finditer(text):
+                        field_name = match.group(1).strip()
+                        bbox = span["bbox"] # (x0, y0, x1, y1)
+                        span_center = (bbox[0] + bbox[2]) / 2
+                        
+                        # Heuristic: if span center is within 10% of page center, it's "centered"
+                        is_centered = abs(span_center - page_center) < (page_width * 0.1)
+                        
+                        # Store properties
+                        style = {
+                            "font": span["font"],
+                            "size": span["size"],
+                            "color": span["color"],
+                            "flags": span["flags"],
+                            "align": "center" if is_centered else "left"
+                        }
+                        
+                        if field_name not in result:
+                            result[field_name] = []
+                        result[field_name].append({
+                            "type": "text_overlay",
+                            "page": page_idx,
+                            "rect": bbox,
+                            "style": style
+                        })
 
     doc.close()
     return result
@@ -110,7 +143,15 @@ def render_pdf_certificate(
         placeholder_map = extract_pdf_placeholders(template_path)
 
     doc = fitz.open(template_path)
-    IMAGE_FIELDS = {"digital_signature", "stamp"}
+    
+    # --- PASS 1: Define what counts as an image field ---
+    def is_signature(name: str) -> bool:
+        n = name.lower()
+        return "signature" in n or "sign" in n or n == "sig"
+
+    def is_stamp(name: str) -> bool:
+        n = name.lower()
+        return "stamp" in n or "seal" in n or "logo" in n
 
     # Pre-index widgets by name for each page to avoid O(N*W) complexity
     if widget_index is None:
@@ -120,61 +161,109 @@ def render_pdf_certificate(
     else:
         page_widgets = widget_index
 
+    print(f"DEBUG: Starting PDF Render for {template_path}")
+    print(f"DEBUG: field_values keys: {list(field_values.keys())}")
+    
     for field_name, occurrences in placeholder_map.items():
-        value = field_values.get(field_name, "")
-        is_image_field = field_name in IMAGE_FIELDS
+        # Get value with fallbacks for common design names
+        value = field_values.get(field_name)
+        if value is None:
+            fn_lower = field_name.lower().strip().replace("_", "").replace(" ", "")
+            # Collect all field values with normalized keys
+            normalized_field_values = {
+                str(k).lower().strip().replace("_", "").replace(" ", ""): v 
+                for k, v in field_values.items()
+            }
+            
+            if fn_lower in {"recipientname", "studentname", "fullname", "name", "recipient"}:
+                value = normalized_field_values.get("studentname") or normalized_field_values.get("recipientname") or normalized_field_values.get("name")
+            elif fn_lower in {"coursename", "course", "subject", "training", "program"}:
+                value = normalized_field_values.get("coursename") or normalized_field_values.get("course")
+            elif fn_lower in {"certid", "certificateid", "id"}:
+                value = normalized_field_values.get("certid") or normalized_field_values.get("id")
+            elif fn_lower in {"issuedat", "date", "issuedon"}:
+                value = normalized_field_values.get("issuedat") or normalized_field_values.get("issuedon")
+            else:
+                # Direct match on normalized key
+                value = normalized_field_values.get(fn_lower)
+        
+        print(f"DEBUG: Field '{field_name}' -> Value: '{value}' (Type: {type(value)})")
+        
+        if value is None:
+            value = ""
+        
+        is_sig_field = is_signature(field_name)
+        is_stamp_field = is_stamp(field_name)
+        is_image_field = is_sig_field or is_stamp_field
 
-        for occ in occurrences:
+        for occ_idx, occ in enumerate(occurrences):
             page_idx = occ["page"]
             page = doc[page_idx]
             rect = fitz.Rect(occ["rect"])
             
             if occ["type"] == "acroform":
-                widget = page_widgets.get(page_idx, {}).get(field_name)
-                if widget:
-                    # For widgets, we need to bind them to the existing doc/page
-                    # fitz widgets are bound to the document they were read from.
-                    # If we use a CACHED widget_index, we MUST ensure the widget is from the SAME doc.
-                    # ACTUALLY, PyMuPDF widgets are bound to the document. 
-                    # If we opened a NEW doc, we must find the widget in THIS doc.
-                    # So caching the widget OBJECTS won't work across fitz.open calls.
-                    # BUT we can cache the widget names and types if needed.
-                    # However, searching by name is still O(W).
-                    
-                    # Re-finding the widget in the current doc's page
-                    target_widget = None
-                    for w in page.widgets():
-                        if w.field_name == field_name:
-                            target_widget = w
-                            break
-                    
-                    if target_widget:
-                        if is_image_field:
-                            img_path = signature_img_path if field_name == "digital_signature" else stamp_img_path
-                            if img_path and Path(img_path).exists():
-                                page.insert_image(rect, filename=img_path)
-                        else:
-                            target_widget.field_value = str(value)
-                            target_widget.update()
+                target_widget = page_widgets.get(page_idx, {}).get(field_name)
+                if target_widget:
+                    if is_image_field:
+                        img_path = signature_img_path if is_sig_field else stamp_img_path
+                        if img_path and Path(img_path).exists():
+                            page.insert_image(rect, filename=img_path, keep_proportion=True)
+                    else:
+                        target_widget.field_value = str(value)
+                        target_widget.update()
             else:
+                # Erase placeholder text
                 page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
 
                 if is_image_field:
-                    img_path = signature_img_path if field_name == "digital_signature" else stamp_img_path
+                    img_path = signature_img_path if is_sig_field else stamp_img_path
                     if img_path and Path(img_path).exists():
-                        page.insert_image(rect, filename=img_path)
+                        page.insert_image(rect, filename=img_path, keep_proportion=True)
                 else:
                     if value:
-                        font_size = min(rect.height * 0.9, 14)
-                        page.insert_text(
-                            point=fitz.Point(rect.x0, rect.y1 - (rect.height * 0.15)),
-                            text=str(value),
-                            fontsize=font_size,
-                            color=(0, 0, 0),
-                        )
+                        style = occ.get("style", {})
+                        font_size = style.get("size", min(rect.height * 0.9, 14))
+                        ext_font = style.get("font", "helv")
+                        font_name = _map_font_name(ext_font)
+                        alignment = style.get("align", "left")
 
-    # Flatten the form (makes it uneditable and professional)
-    doc.need_appearances(True) # Ensure values are visible
+                        # RGB color conversion
+                        color_int = style.get("color", 0)
+                        red = (color_int >> 16) & 255
+                        green = (color_int >> 8) & 255
+                        blue = color_int & 255
+                        color_tuple = (red/255, green/255, blue/255)
+
+                        # If centered, expand the box to page width
+                        render_rect = rect
+                        if alignment == "center":
+                            render_rect = fitz.Rect(10, rect.y0, page.rect.width - 10, rect.y1 + 10)
+                            align_val = fitz.TEXT_ALIGN_CENTER
+                        else:
+                            align_val = fitz.TEXT_ALIGN_LEFT
+
+                        print(f"DEBUG: Rendering '{field_name}' as '{value}' at {render_rect} Align={alignment}")
+                        try:
+                            page.insert_textbox(
+                                rect=render_rect,
+                                buffer=str(value),
+                                fontsize=font_size,
+                                fontname=font_name,
+                                color=color_tuple,
+                                align=align_val
+                            )
+                        except Exception as e:
+                            print(f"DEBUG: Rendering failed, falling back. Error: {e}")
+                            page.insert_text(
+                                point=fitz.Point(rect.x0, rect.y1 - (rect.height * 0.2)),
+                                text=str(value),
+                                fontsize=font_size,
+                                fontname="helv",
+                                color=color_tuple,
+                            )
+
+    # Flatten the form
+    doc.need_appearances(True)
     doc.save(output_path)
     doc.close()
     
@@ -193,29 +282,97 @@ def apply_signatures_to_pdf(
     stamp_img_path: str | None,
     template_path: str,
     output_path: str,
+    signer_info: dict | None = None,
 ) -> str:
     """
-    Applies images to an already rendered PDF.
+    Applies images to an already rendered PDF using the original template's coordinates.
     """
     placeholder_map = extract_pdf_placeholders(template_path)
     doc = fitz.open(pdf_path)
 
+    # Re-use the same flexible matching logic
+    def is_signature(name: str) -> bool:
+        n = name.lower()
+        return "signature" in n or "sign" in n or n == "sig"
+
+    def is_stamp(name: str) -> bool:
+        n = name.lower()
+        return "stamp" in n or "seal" in n or "logo" in n
+
     for field_name, occurrences in placeholder_map.items():
-        img_path = None
-        if field_name == "digital_signature":
-            img_path = signature_img_path
-        elif field_name == "stamp":
-            img_path = stamp_img_path
+        is_sig = is_signature(field_name)
+        is_stmp = is_stamp(field_name)
         
-        if not img_path or not Path(img_path).exists():
+        # Determine if this is a text placeholder for signer info
+        is_signer_name = "signer_name" in field_name.lower() or "authority_name" in field_name.lower()
+        is_signer_role = "signer_role" in field_name.lower() or "authority_title" in field_name.lower()
+
+        img_path = None
+        text_val = None
+
+        if is_sig:
+            img_path = signature_img_path
+        elif is_stmp:
+            img_path = stamp_img_path
+        elif is_signer_name and signer_info:
+            text_val = signer_info.get("name")
+        elif is_signer_role and signer_info:
+            text_val = signer_info.get("role")
+        
+        # Skip if nothing to apply
+        if not img_path and not text_val:
+            continue
+        if img_path and not Path(img_path).exists():
             continue
 
         for occ in occurrences:
             page = doc[occ["page"]]
             rect = fitz.Rect(occ["rect"])
-            # Erase existing placeholder text/blank space
+            
+            # Erase existing placeholder
             page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-            page.insert_image(rect, filename=img_path)
+
+            if img_path:
+                page.insert_image(rect, filename=img_path, keep_proportion=True)
+            elif text_val:
+                style = occ.get("style", {})
+                font_size = style.get("size", min(rect.height * 0.8, 12))
+                ext_font = style.get("font", "helv")
+                font_name = _map_font_name(ext_font)
+                alignment = style.get("align", "left")
+                
+                # RGB color conversion
+                color_int = style.get("color", 0)
+                red = (color_int >> 16) & 255
+                green = (color_int >> 8) & 255
+                blue = color_int & 255
+                color_tuple = (red/255, green/255, blue/255)
+
+                render_rect = rect
+                if alignment == "center":
+                    render_rect = fitz.Rect(10, rect.y0, page.rect.width - 10, rect.y1 + 10)
+                    align_val = fitz.TEXT_ALIGN_CENTER
+                else:
+                    align_val = fitz.TEXT_ALIGN_LEFT
+
+                try:
+                    page.insert_textbox(
+                        rect=render_rect,
+                        buffer=str(text_val),
+                        fontsize=font_size,
+                        fontname=font_name,
+                        color=color_tuple,
+                        align=align_val
+                    )
+                except Exception as e:
+                    print(f"DEBUG: Rendering failed in sign apply. Error: {e}")
+                    page.insert_text(
+                        point=fitz.Point(rect.x0, rect.y1 - (rect.height * 0.2)),
+                        text=str(text_val),
+                        fontsize=font_size,
+                        fontname="helv",
+                        color=color_tuple
+                    )
 
     doc.save(output_path)
     doc.close()
