@@ -4,7 +4,7 @@ import React from "react"
 
 import { useAuth } from "@/context/AuthContext"
 import { motion } from "framer-motion"
-import { Settings, User, Shield, Key, Bell, Globe, Cpu, Database } from "lucide-react"
+import { Settings, User, Shield, Key, Bell, Globe, Cpu, Database, PenTool, Hash } from "lucide-react"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 
@@ -25,6 +25,7 @@ export default function SettingsPage() {
                         { name: "My Profile", icon: User, active: true },
                         { name: "Security", icon: Shield },
                         { name: "API Keys", icon: Key },
+                        { name: "Signatures", icon: PenTool },
                         { name: "Notifications", icon: Bell },
                         { name: "Integration", icon: Globe },
                     ].map((item) => (
@@ -62,10 +63,47 @@ export default function SettingsPage() {
                         </CardContent>
                     </Card>
 
+                    <Card id="signatures" className="bg-white border-indigo-200 shadow-lg shadow-indigo-500/5 rounded-2xl overflow-hidden ring-1 ring-indigo-50">
+                        <div className="h-1.5 bg-indigo-600 w-full"></div>
+                        <CardHeader>
+                            <CardTitle className="text-lg text-slate-900 flex items-center gap-2">
+                                <PenTool className="w-5 h-5 text-indigo-600" />
+                                Authorized Signatures
+                            </CardTitle>
+                            <CardDescription className="font-medium text-slate-500">Manage your digital stamp and signature profile for certificate sealing.</CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-6">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="p-6 rounded-2xl border-2 border-dashed border-slate-200 hover:border-indigo-400 transition-colors bg-slate-50 flex flex-col items-center justify-center text-center group cursor-pointer">
+                                    <div className="w-12 h-12 rounded-full bg-white shadow-sm flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                                        <PenTool className="w-6 h-6 text-slate-400 group-hover:text-indigo-600" />
+                                    </div>
+                                    <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Digital Signature</p>
+                                    <p className="text-[10px] text-slate-400 mt-1 font-bold">Upload PNG (Transparent)</p>
+                                </div>
+                                <div className="p-6 rounded-2xl border-2 border-dashed border-slate-200 hover:border-indigo-400 transition-colors bg-slate-50 flex flex-col items-center justify-center text-center group cursor-pointer">
+                                    <div className="w-12 h-12 rounded-full bg-white shadow-sm flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                                        <Hash className="w-6 h-6 text-slate-400 group-hover:text-indigo-600" />
+                                    </div>
+                                    <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Official Stamp</p>
+                                    <p className="text-[10px] text-slate-400 mt-1 font-bold">Upload Circular Seal</p>
+                                </div>
+                            </div>
+
+                            <div className="p-4 rounded-xl bg-amber-50 border border-amber-100 flex gap-3 items-start">
+                                <Shield className="w-5 h-5 text-amber-600 mt-0.5" />
+                                <div className="text-xs text-amber-800 font-medium leading-relaxed">
+                                    <p className="font-bold">Security Note:</p>
+                                    These assets are only used to visually represent your cryptographic signature on the final PDF documents. They are stored securely and never shared publicly.
+                                </div>
+                            </div>
+                        </CardContent>
+                    </Card>
+
                     <Card className="bg-white border-slate-200 shadow-sm rounded-2xl">
                         <CardHeader>
                             <CardTitle className="text-lg text-slate-900">Security & Encryption</CardTitle>
-                            <CardDescription className="font-medium">Your account is protected by industry-standard cryptography.</CardDescription>
+                            <CardDescription className="font-medium text-slate-500">Your account is protected by industry-standard cryptography.</CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-4">
                             <div className="space-y-4">

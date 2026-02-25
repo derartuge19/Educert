@@ -1,6 +1,7 @@
 "use client"
 
-import React, { useState, useRef, useCallback } from "react"
+import React, { useState, useRef, useCallback, useEffect, Suspense } from "react"
+import { useSearchParams } from "next/navigation"
 import { useAuth } from "@/context/AuthContext"
 import { motion, AnimatePresence } from "framer-motion"
 import {
@@ -9,11 +10,13 @@ import {
     GraduationCap, Award, BookOpen, Briefcase, Star, Users, FileText,
     AlertCircle, Table2, FileSpreadsheet, CheckCircle2, PenLine,
     Stamp, UserCheck, ChevronRight, FileSearch, Signature, Lock,
-    ClipboardCheck, SquarePen
+    ClipboardCheck, SquarePen, PenTool
 } from "lucide-react"
 import axios from "axios"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Badge } from "../../components/ui/badge"
+import { Input } from "../../components/ui/input"
 
 const API = "http://localhost:8000"
 
@@ -48,6 +51,10 @@ interface SignRecord {
 // ── Cert Types ─────────────────────────────────────────────────────────────────
 const CERT_TYPES = [
     { id: "degree", label: "Degree", icon: GraduationCap, color: "from-indigo-500 to-indigo-700", border: "border-indigo-200", ring: "ring-indigo-500", bg: "bg-indigo-50", desc: "Bachelor's, Master's, PhD" },
+    { id: "birth_certificate", label: "Birth Certificate", icon: FileText, color: "from-blue-500 to-blue-700", border: "border-blue-200", ring: "ring-blue-500", bg: "bg-blue-50", desc: "Official birth records" },
+    { id: "trade", label: "Trade Certificate", icon: Briefcase, color: "from-orange-500 to-orange-700", border: "border-orange-200", ring: "ring-orange-500", bg: "bg-orange-50", desc: "Vocational & technical skills" },
+    { id: "business", label: "Business License", icon: Shield, color: "from-slate-600 to-slate-800", border: "border-slate-300", ring: "ring-slate-600", bg: "bg-slate-100", desc: "Company & trade permits" },
+    { id: "education", label: "Education Cert", icon: BookOpen, color: "from-emerald-500 to-emerald-700", border: "border-emerald-200", ring: "ring-emerald-500", bg: "bg-emerald-50", desc: "General educational awards" },
     { id: "diploma", label: "Diploma", icon: Award, color: "from-violet-500 to-violet-700", border: "border-violet-200", ring: "ring-violet-500", bg: "bg-violet-50", desc: "Diploma, HND, Foundation" },
     { id: "training", label: "Training", icon: BookOpen, color: "from-emerald-500 to-emerald-700", border: "border-emerald-200", ring: "ring-emerald-500", bg: "bg-emerald-50", desc: "Bootcamp, workshop, course" },
     { id: "professional", label: "Professional", icon: Briefcase, color: "from-amber-500 to-amber-700", border: "border-amber-200", ring: "ring-amber-500", bg: "bg-amber-50", desc: "Certification, license" },
@@ -186,9 +193,10 @@ function ImageUploadBox({ label, icon: Icon, file, onChange, accept = "image/*" 
     )
 }
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
-export default function IssuePage() {
+// ── Main Page Content ──────────────────────────────────────────────────────────
+function IssuePageContent() {
     const { user } = useAuth()
+    const searchParams = useSearchParams()
 
     // ── Step state
     const [step, setStep] = useState<1 | 2>(1)
@@ -204,6 +212,7 @@ export default function IssuePage() {
     // ── Step 1: Issue mode
     const [issueMode, setIssueMode] = useState<"single" | "bulk">("single")
     const [templateFields, setTemplateFields] = useState<Record<string, string>>({})
+    const [selectedType, setSelectedType] = useState<string>("certificate")
     const [bulkFile, setBulkFile] = useState<File | null>(null)
     const bulkInputRef = useRef<HTMLInputElement>(null)
 
@@ -220,6 +229,39 @@ export default function IssuePage() {
     const [sigRecordId, setSigRecordId] = useState<number | null>(null)
     const [signLoading, setSignLoading] = useState(false)
     const [uploadedSignatureRecord, setUploadedSignatureRecord] = useState<SignRecord | null>(null)
+    const [isInitialized, setIsInitialized] = useState(false)
+    const [previewLoading, setPreviewLoading] = useState(false)
+    const [previewImage, setPreviewImage] = useState<string | null>(null)
+
+    // ── Deep Linking Handling
+    useEffect(() => {
+        const initFromParams = async () => {
+            const certId = searchParams.get("certId")
+            const paramStep = searchParams.get("step")
+
+            if (certId && paramStep === "2") {
+                try {
+                    setLoading(true)
+                    const res = await axios.get<IssuedCert>(`${API}/api/certificates/${certId}`, { withCredentials: true })
+                    if (res.data) {
+                        setIssuedCerts([res.data])
+                        setSelectedCertIds(new Set([res.data.id]))
+                        setStep(2)
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch certificate for deep-link:", err)
+                    setError("Could not find the certificate for signing. Please try again from the registry.")
+                } finally {
+                    setLoading(false)
+                }
+            }
+            setIsInitialized(true)
+        }
+
+        if (!isInitialized) {
+            initFromParams()
+        }
+    }, [searchParams, isInitialized])
 
     // ─────────────────────────────────────────────────────────────────────────
     // Handlers
@@ -280,7 +322,7 @@ export default function IssuePage() {
                 const res = await axios.post(`${API}/api/issue`, {
                     student_name: sName,
                     course_name: cName,
-                    cert_type: templateFields["cert_type"] || "certificate",
+                    cert_type: selectedType,
                     data_payload: { ...templateFields }
                 }, { withCredentials: true })
                 const cert: IssuedCert = { id: res.data.id, student_name: sName, course_name: cName, signing_status: "unsigned" }
@@ -299,6 +341,7 @@ export default function IssuePage() {
         setLoading(true); setError("")
         try {
             const fd = new FormData(); fd.append("file", bulkFile)
+            fd.append("cert_type", selectedType)
             const endpoint = bulkFile.name.endsWith(".xlsx")
                 ? `${API}/api/templates/bulk-issue-excel`
                 : `${API}/api/templates/bulk-issue`
@@ -361,6 +404,24 @@ export default function IssuePage() {
         })
     }, [])
 
+    const handleGeneratePreview = async () => {
+        if (!sigRecordId || issuedCerts.length === 0) return
+        setPreviewLoading(true); setError("")
+        try {
+            const firstCertId = issuedCerts[0].id
+            const res = await axios.get(`${API}/api/preview-signature/${firstCertId}/${sigRecordId}`, {
+                responseType: 'blob',
+                withCredentials: true
+            })
+            setPreviewImage(URL.createObjectURL(res.data))
+        } catch (err) {
+            console.error("Preview failed:", err)
+            setError("Failed to generate signature preview.")
+        } finally {
+            setPreviewLoading(false)
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Access guard
     // ─────────────────────────────────────────────────────────────────────────
@@ -414,6 +475,38 @@ export default function IssuePage() {
             {step === 1 && (
                 <div className="space-y-6">
 
+                    {/* Category Selection */}
+                    <div>
+                        <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <Tag className="w-3.5 h-3.5 text-indigo-500" /> Choose Certificate Category
+                        </p>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                            {CERT_TYPES.map(type => (
+                                <button
+                                    key={type.id}
+                                    onClick={() => setSelectedType(type.id)}
+                                    className={`relative flex flex-col items-center gap-3 p-4 rounded-2xl border-2 transition-all text-center ${selectedType === type.id
+                                        ? `border-indigo-500 bg-white shadow-lg ring-2 ring-indigo-500/20`
+                                        : "border-slate-100 bg-slate-50/50 hover:border-slate-200 hover:bg-white"
+                                        }`}
+                                >
+                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center bg-gradient-to-br ${type.color} text-white shadow-md`}>
+                                        <type.icon className="w-5 h-5" />
+                                    </div>
+                                    <div className="space-y-0.5">
+                                        <p className={`text-xs font-bold ${selectedType === type.id ? "text-indigo-900" : "text-slate-700"}`}>{type.label}</p>
+                                        <p className="text-[10px] text-slate-400 font-medium leading-tight">{type.desc}</p>
+                                    </div>
+                                    {selectedType === type.id && (
+                                        <div className="absolute top-2 right-2 w-5 h-5 bg-indigo-500 rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-white">
+                                            <Check className="w-3 h-3" />
+                                        </div>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
                     {/* Template upload */}
                     <div>
                         <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
@@ -442,8 +535,8 @@ export default function IssuePage() {
                                         <div>
                                             <p className="text-sm font-bold text-indigo-800">Signature placeholders detected</p>
                                             <p className="text-xs text-indigo-600 mt-0.5">
-                                                {parsedTemplate.signature_fields.map(f => (
-                                                    <code key={f} className="bg-indigo-100 px-1.5 py-0.5 rounded mr-1">{`{{${f}}}`}</code>
+                                                {parsedTemplate.signature_fields.map((f, i) => (
+                                                    <code key={`${f}-${i}`} className="bg-indigo-100 px-1.5 py-0.5 rounded mr-1">{`{{${f}}}`}</code>
                                                 ))}
                                                 — these will be filled in Step 2 with your uploaded signature/stamp images.
                                             </p>
@@ -461,8 +554,8 @@ export default function IssuePage() {
                                             </div>
                                             <div className="flex flex-wrap gap-2">
                                                 {[...parsedTemplate.system_fields.filter(f => SYSTEM_AUTO.has(f)),
-                                                ...parsedTemplate.signature_fields || []].map(f => (
-                                                    <span key={f} className="px-3 py-1 bg-white border border-slate-200 rounded-full text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                                                ...parsedTemplate.signature_fields || []].map((f, i) => (
+                                                    <span key={`${f}-${i}`} className="px-3 py-1 bg-white border border-slate-200 rounded-full text-xs font-semibold text-slate-600 flex items-center gap-1.5">
                                                         <Check className="w-3 h-3 text-emerald-500" />{SYSTEM_AUTO_LABELS[f] || f}
                                                     </span>
                                                 ))}
@@ -493,24 +586,24 @@ export default function IssuePage() {
                                             </CardDescription>
                                         </CardHeader>
                                         <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                                            {parsedTemplate.input_fields.map(field => {
-                                                const isCore = isNameField(field) || isCourseField(field)
-                                                const isSig = SIG_FIELDS.has(field)
-                                                if (isSig) return null // handled in step 2
-                                                return (
-                                                    <div key={field} className="space-y-2">
-                                                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
-                                                            <span className={`w-2 h-2 rounded-full inline-block ${isCore ? "bg-indigo-500" : "bg-violet-400"}`} />
-                                                            {field.replace(/_/g, " ")}
-                                                            {isCore && <span className="text-red-400">*</span>}
-                                                        </label>
-                                                        <input type="text" placeholder={`Enter ${field.replace(/_/g, " ")}`}
-                                                            value={templateFields[field] || ""}
-                                                            onChange={e => setTemplateFields({ ...templateFields, [field]: e.target.value })}
-                                                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 focus:ring-2 focus:ring-violet-600/20 focus:border-violet-600 outline-none transition-all font-medium placeholder:text-slate-400" />
-                                                    </div>
-                                                )
-                                            })}
+                                            {parsedTemplate.input_fields
+                                                .filter(field => !SIG_FIELDS.has(field))
+                                                .map((field, i) => {
+                                                    const isCore = isNameField(field) || isCourseField(field)
+                                                    return (
+                                                        <div key={`${field}-${i}`} className="space-y-2">
+                                                            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                                                                <span className={`w-2 h-2 rounded-full inline-block ${isCore ? "bg-indigo-500" : "bg-violet-400"}`} />
+                                                                {field.replace(/_/g, " ")}
+                                                                {isCore && <span className="text-red-400">*</span>}
+                                                            </label>
+                                                            <input type="text" placeholder={`Enter ${field.replace(/_/g, " ")}`}
+                                                                value={templateFields[field] || ""}
+                                                                onChange={e => setTemplateFields({ ...templateFields, [field]: e.target.value })}
+                                                                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 focus:ring-2 focus:ring-violet-600/20 focus:border-violet-600 outline-none transition-all font-medium placeholder:text-slate-400" />
+                                                        </div>
+                                                    )
+                                                })}
                                             <div className="md:col-span-2 p-3 bg-indigo-50 rounded-xl border border-indigo-100 flex gap-2">
                                                 <Sparkles className="w-4 h-4 shrink-0 text-indigo-600 mt-0.5" />
                                                 <p className="text-[10px] leading-tight font-medium text-slate-600">
@@ -520,9 +613,16 @@ export default function IssuePage() {
                                         </CardContent>
                                         <CardFooter className="bg-slate-50 border-t border-slate-100 p-5">
                                             {(() => {
-                                                const hasName = Object.keys(templateFields).some(k => isNameField(k) && templateFields[k].trim())
-                                                const hasCourse = Object.keys(templateFields).some(k => isCourseField(k) && templateFields[k].trim())
-                                                const canIssue = hasName && hasCourse
+                                                const inputFields = parsedTemplate.input_fields
+                                                const hasNameField = inputFields.some(isNameField)
+                                                const hasCourseField = inputFields.some(isCourseField)
+
+                                                const nameValue = Object.keys(templateFields).find(k => isNameField(k) && templateFields[k].trim())
+                                                const courseValue = Object.keys(templateFields).find(k => isCourseField(k) && templateFields[k].trim())
+
+                                                const canIssue = (hasNameField ? !!nameValue : true) &&
+                                                    (hasCourseField ? !!courseValue : true) &&
+                                                    Object.values(templateFields).some(v => v.trim())
 
                                                 return (
                                                     <Button onClick={handleSingleIssue}
@@ -565,22 +665,31 @@ export default function IssuePage() {
                                                         </thead>
                                                         <tbody>
                                                             {parsedTemplate.input_fields.filter(f => !SIG_FIELDS.has(f)).map((field, i) => (
-                                                                <tr key={field} className={i % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
-                                                                    <td className="px-4 py-2.5"><code className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded font-mono text-xs">{field}</code></td>
-                                                                    <td className="px-4 py-2.5"><code className="text-violet-600 bg-violet-50 px-2 py-0.5 rounded font-mono text-xs">{"{{ " + field + " }}"}</code></td>
+                                                                <tr key={`input-${field}-${i}`} className={i % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
                                                                     <td className="px-4 py-2.5">
-                                                                        {(field === "student_name" || field === "course_name")
+                                                                        <div className="flex items-center gap-2">
+                                                                            <code className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded font-mono text-xs">{field}</code>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-4 py-2.5"><code className="text-violet-600 bg-violet-50 px-2 py-0.5 rounded font-mono text-xs">{"{{ " + field + " }}"}</code></td>
+                                                                    <td className="px-4 py-2.5 flex items-center gap-2">
+                                                                        {(field === "student_name" || field === "course_name" || isNameField(field) || isCourseField(field))
                                                                             ? <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-200">Required</span>
                                                                             : <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded">Optional</span>
                                                                         }
+                                                                        {bulkFile && (
+                                                                            <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
+                                                                                <Check className="w-2 h-2" /> Auto-mapped
+                                                                            </span>
+                                                                        )}
                                                                     </td>
                                                                 </tr>
                                                             ))}
                                                             {parsedTemplate.system_fields.filter(f => SYSTEM_AUTO.has(f)).map((field, i) => (
-                                                                <tr key={field} className={(parsedTemplate.input_fields.length + i) % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
+                                                                <tr key={`system-${field}-${i}`} className={(parsedTemplate.input_fields.length + i) % 2 === 0 ? "bg-white" : "bg-slate-50/50"}>
                                                                     <td className="px-4 py-2.5"><span className="text-slate-400 italic text-xs">(auto)</span></td>
                                                                     <td className="px-4 py-2.5"><code className="text-slate-400 bg-slate-100 px-2 py-0.5 rounded font-mono text-xs">{"{{ " + field + " }}"}</code></td>
-                                                                    <td className="px-4 py-2.5"><span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">Auto-filled</span></td>
+                                                                    <td className="px-4 py-2.5"><span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">System Filled</span></td>
                                                                 </tr>
                                                             ))}
                                                         </tbody>
@@ -651,49 +760,55 @@ export default function IssuePage() {
                         </button>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-
-                        {/* ── Left: Signer Info + Images ── */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        {/* ── Left: Signature configuration ── */}
                         <div className="space-y-5">
                             <Card className="bg-white border-slate-200 shadow-xl rounded-2xl overflow-hidden">
-                                <div className="h-1.5 bg-gradient-to-r from-purple-600 to-indigo-600" />
+                                <div className="h-1.5 bg-gradient-to-r from-purple-600 to-indigo-500" />
                                 <CardHeader>
-                                    <CardTitle className="flex items-center gap-2"><UserCheck className="w-5 h-5 text-purple-600" />Signer Details</CardTitle>
-                                    <CardDescription>Upload your signature and stamp, then apply them to the selected certificates.</CardDescription>
+                                    <div className="flex items-center justify-between">
+                                        <CardTitle className="flex items-center gap-2"><PenTool className="w-5 h-5 text-purple-600" />Signer Setup</CardTitle>
+                                        <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-100">Step 2</Badge>
+                                    </div>
+                                    <CardDescription>Setup your digital signature and stamp for these certificates.</CardDescription>
                                 </CardHeader>
-                                <CardContent className="space-y-4">
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Signer Full Name *</label>
-                                        <input type="text" placeholder="e.g. Dr. Abebe Girma"
-                                            value={signerName} onChange={e => setSignerName(e.target.value)}
-                                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all font-medium placeholder:text-slate-400" />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Role / Title *</label>
-                                        <input type="text" placeholder="e.g. Dean of Faculty / Director"
-                                            value={signerRole} onChange={e => setSignerRole(e.target.value)}
-                                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all font-medium placeholder:text-slate-400" />
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-3 pt-1">
+                                <CardContent className="space-y-5 pb-6">
+                                    <div className="grid grid-cols-2 gap-4">
                                         <div className="space-y-1.5">
-                                            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1"><PenLine className="w-3 h-3" /> Signature</p>
-                                            <ImageUploadBox label="Upload Signature" icon={Signature} file={signatureFile} onChange={setSignatureFile} />
+                                            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Signer Name</label>
+                                            <Input value={signerName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSignerName(e.target.value)} placeholder="e.g. Dr. Jane Doe" className="rounded-xl border-slate-200" />
                                         </div>
                                         <div className="space-y-1.5">
-                                            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1"><Stamp className="w-3 h-3" /> Stamp</p>
-                                            <ImageUploadBox label="Upload Stamp" icon={Stamp} file={stampFile} onChange={setStampFile} />
+                                            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Signer Role</label>
+                                            <Input value={signerRole} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSignerRole(e.target.value)} placeholder="e.g. Dean of Studies" className="rounded-xl border-slate-200" />
                                         </div>
                                     </div>
 
-                                    <p className="text-[10px] text-slate-400 text-center">
-                                        Images will be placed on top of the <code>{"{{digital_signature}}"}</code> / <code>{"{{stamp}}"}</code> placeholders in the PDF.
-                                    </p>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Signature Image</label>
+                                            <div className="relative group cursor-pointer" onClick={() => (document.getElementById("sig-input") as HTMLInputElement).click()}>
+                                                <div className="flex flex-col items-center justify-center h-20 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-white hover:border-purple-400 transition-all">
+                                                    {signatureFile ? <p className="text-[10px] font-bold text-purple-600 truncate px-2 italic">{signatureFile.name}</p> : <Upload className="w-4 h-4 text-slate-300" />}
+                                                </div>
+                                                <input id="sig-input" type="file" className="hidden" accept="image/*" onChange={e => e.target.files?.[0] && setSignatureFile(e.target.files[0])} />
+                                            </div>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Stamp Image</label>
+                                            <div className="relative group cursor-pointer" onClick={() => (document.getElementById("stamp-input") as HTMLInputElement).click()}>
+                                                <div className="flex flex-col items-center justify-center h-20 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 hover:bg-white hover:border-purple-400 transition-all">
+                                                    {stampFile ? <p className="text-[10px] font-bold text-purple-600 truncate px-2 italic">{stampFile.name}</p> : <Upload className="w-4 h-4 text-slate-300" />}
+                                                </div>
+                                                <input id="stamp-input" type="file" className="hidden" accept="image/*" onChange={e => e.target.files?.[0] && setStampFile(e.target.files[0])} />
+                                            </div>
+                                        </div>
+                                    </div>
                                 </CardContent>
                                 <CardFooter className="border-t border-slate-100 bg-slate-50 p-5 flex flex-col gap-3">
                                     {!uploadedSignatureRecord ? (
                                         <Button onClick={handleUploadSignatureAssets}
-                                            className="w-full h-11 rounded-xl font-bold bg-purple-600 hover:bg-purple-700"
+                                            className="w-full h-12 rounded-xl font-bold bg-purple-600 hover:bg-purple-700"
                                             disabled={signLoading || !signerName || !signerRole || (!signatureFile && !stampFile)}>
                                             {signLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Upload className="w-4 h-4 mr-2" />}
                                             Upload Signature & Stamp
@@ -716,6 +831,42 @@ export default function IssuePage() {
                                     )}
                                 </CardFooter>
                             </Card>
+
+                            {/* Preview of signature/stamp on template */}
+                            {uploadedSignatureRecord && (
+                                <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+                                    <Card className="bg-white border-slate-200 shadow-xl rounded-2xl overflow-hidden">
+                                        <div className="h-1.5 bg-gradient-to-r from-purple-600 to-indigo-500" />
+                                        <CardHeader>
+                                            <CardTitle className="flex items-center gap-2"><Eye className="w-5 h-5 text-purple-600" />Signature Preview</CardTitle>
+                                            <CardDescription>See how your signature and stamp will appear on the certificate.</CardDescription>
+                                        </CardHeader>
+                                        <CardContent className="p-0">
+                                            <div className="relative w-full aspect-[1.414/1] bg-slate-100 flex items-center justify-center">
+                                                {previewLoading && (
+                                                    <div className="absolute inset-0 flex items-center justify-center bg-slate-50/80 z-10">
+                                                        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+                                                    </div>
+                                                )}
+                                                {previewImage && (
+                                                    <img src={previewImage} alt="Signature Preview" className="w-full h-full object-contain" />
+                                                )}
+                                                {!previewImage && !previewLoading && (
+                                                    <p className="text-slate-400 text-sm">No preview available</p>
+                                                )}
+                                            </div>
+                                        </CardContent>
+                                        <CardFooter className="border-t border-slate-100 bg-slate-50 p-5">
+                                            <Button onClick={handleGeneratePreview}
+                                                className="w-full h-12 rounded-xl font-bold bg-purple-600 hover:bg-purple-700"
+                                                disabled={previewLoading || !uploadedSignatureRecord}>
+                                                {previewLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Eye className="w-4 h-4 mr-2" />}
+                                                Generate Preview
+                                            </Button>
+                                        </CardFooter>
+                                    </Card>
+                                </motion.div>
+                            )}
                         </div>
 
                         {/* ── Right: Certificate Selection ── */}
@@ -737,37 +888,37 @@ export default function IssuePage() {
                                     </CardDescription>
                                 </CardHeader>
                                 <CardContent className="p-0 max-h-64 overflow-y-auto">
-                                    {issuedCerts.map((cert, i) => (
-                                        <div key={cert.id}
-                                            className={`flex items-center gap-3 px-5 py-3 cursor-pointer transition-colors border-b border-slate-100 last:border-0 ${selectedCertIds.has(cert.id) ? "bg-indigo-50" : "bg-white hover:bg-slate-50"}`}
-                                            onClick={() => cert.signing_status !== "signed" && toggleCert(cert.id)}>
-                                            <div className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 ${cert.signing_status === "signed" ? "border-emerald-500 bg-emerald-500" : selectedCertIds.has(cert.id) ? "border-indigo-600 bg-indigo-600" : "border-slate-300"}`}>
-                                                {(cert.signing_status === "signed" || selectedCertIds.has(cert.id)) && <Check className="w-3 h-3 text-white" />}
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="text-sm font-semibold text-slate-900 truncate">{cert.student_name}</p>
-                                                <p className="text-xs text-slate-500 truncate">{cert.course_name}</p>
-                                            </div>
+                                    <div className="flex flex-col">
+                                        {issuedCerts.map(cert => {
+                                            const isSelected = selectedCertIds.has(cert.id)
+                                            const isSigned = cert.signing_status === "signed"
 
-                                            {/* Preview Button */}
-                                            <a
-                                                href={`${API}/api/download/${cert.id}`}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                                                title="Preview Unsigned Certificate"
-                                            >
-                                                <Eye className="w-4 h-4" />
-                                            </a>
-
-                                            {cert.signing_status === "signed" ? (
-                                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200">Signed</span>
-                                            ) : (
-                                                <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">Pending</span>
-                                            )}
-                                        </div>
-                                    ))}
+                                            return (
+                                                <div key={cert.id} className={`group flex items-center gap-3 p-4 border-b border-slate-100 last:border-0 transition-all ${isSelected ? "bg-indigo-50/50" : "bg-white hover:bg-slate-50"}`}>
+                                                    <button onClick={() => !isSigned && toggleCert(cert.id)}
+                                                        className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all ${isSigned ? "bg-slate-100 border-slate-200 cursor-not-allowed" : isSelected ? "bg-indigo-600 border-indigo-600 shadow-sm" : "bg-white border-slate-300 group-hover:border-indigo-400"}`}>
+                                                        {isSigned ? <Lock className="w-3 h-3 text-slate-400" /> : isSelected && <Check className="w-3.5 h-3.5 text-white stroke-[3px]" />}
+                                                    </button>
+                                                    <div className="flex-1 min-w-0" onClick={() => !isSigned && toggleCert(cert.id)}>
+                                                        <div className="flex items-center gap-2">
+                                                            <p className="text-sm font-bold text-slate-800 truncate">{cert.student_name}</p>
+                                                            {isSigned && <span className="text-[10px] font-bold text-emerald-600 px-1.5 py-0.5 bg-emerald-50 rounded-full border border-emerald-100">Signed</span>}
+                                                        </div>
+                                                        <p className="text-[10px] text-slate-500 font-medium truncate flex items-center gap-1.5 mt-0.5">
+                                                            <BookOpen className="w-3 h-3 text-slate-400" /> {cert.course_name}
+                                                        </p>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <a href={`${API}/api/download/${cert.id}`} target="_blank" rel="noreferrer"
+                                                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                                                            title="Preview Certificate">
+                                                            <Eye className="w-4 h-4" />
+                                                        </a>
+                                                    </div>
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
                                 </CardContent>
                                 <CardFooter className="border-t border-slate-100 bg-slate-50 p-5">
                                     <Button onClick={handleApplySignatures}
@@ -786,17 +937,17 @@ export default function IssuePage() {
                             {/* Download section — shown after signing */}
                             {signedResults.length > 0 && (
                                 <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-                                    <Card className="bg-white border-emerald-200 shadow-lg rounded-2xl overflow-hidden">
+                                    <Card className="bg-white border-emerald-200 shadow-lg rounded-2xl overflow-hidden mt-4">
                                         <div className="h-1.5 bg-emerald-500" />
                                         <CardHeader className="pb-3">
                                             <CardTitle className="flex items-center gap-2 text-emerald-800">
                                                 <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                                                {signedResults.length} Certificate{signedResults.length !== 1 ? "s" : ""} Signed — Ready to Download
+                                                {signedResults.length} Certificate{signedResults.length !== 1 ? "s" : ""} Signed
                                             </CardTitle>
                                         </CardHeader>
                                         <CardContent className="space-y-2 max-h-48 overflow-y-auto p-4">
-                                            {signedResults.map(cert => (
-                                                <div key={cert.id} className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                                            {signedResults.map((cert, i) => (
+                                                <div key={`signed-${cert.id}-${i}`} className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100">
                                                     <div>
                                                         <p className="text-sm font-semibold text-emerald-900">{cert.student_name}</p>
                                                     </div>
@@ -815,5 +966,20 @@ export default function IssuePage() {
                 </div>
             )}
         </div>
+    )
+}
+
+export default function Page() {
+    return (
+        <Suspense fallback={
+            <div className="flex items-center justify-center min-h-[50vh]">
+                <div className="flex flex-col items-center gap-4">
+                    <Loader2 className="w-10 h-10 animate-spin text-indigo-600" />
+                    <p className="text-slate-500 font-medium animate-pulse">Loading issuance wizard...</p>
+                </div>
+            </div>
+        }>
+            <IssuePageContent />
+        </Suspense>
     )
 }
