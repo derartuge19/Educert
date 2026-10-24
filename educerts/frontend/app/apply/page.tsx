@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import qrcode from "qrcode"
 
-export default function ApplyPage() {
+export default  function ApplyPage() {
     const [step, setStep] = useState(1)
     const [qrData, setQrData] = useState("")
     const [loading, setLoading] = useState(false)
